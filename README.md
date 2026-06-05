@@ -287,3 +287,20 @@ This sandbox is **not a CI pipeline**. It does not know how to build or test Ner
 The AI agent is responsible for reading `package.json`, deciding which scripts to run, executing them in the right order, and interpreting the results.
 
 Any script that infers build/test/run commands from `package.json` and executes them is a **harness simulation** — a demonstration of what an agent would do, not a required part of the sandbox.
+
+### Guidance: limit repository inspection to build-relevant files
+
+When the agent inspects the cloned workspace, it should **avoid a full recursive scan** of the repository tree. Reading every source file adds noise, bloats the agent's context window, and risks pulling in application-domain details that are irrelevant to building and running the project.
+
+Instead, target only the files that directly describe how the project is built, tested, and run:
+
+| Priority | Files to read |
+|----------|--------------|
+| Always | `package.json` / `Cargo.toml` / `pyproject.toml` (or equivalent manifest) |
+| Always | `Dockerfile`, `docker-compose.yml`, `.dockerignore` |
+| Always | `README.md`, `CONTRIBUTING.md` (top-level only) |
+| If present | `tsconfig.json`, `jest.config.*`, `vitest.config.*`, `Makefile`, `.env.example` |
+| If present | CI config (`.github/workflows/`, `.gitlab-ci.yml`) — reveals tested build steps |
+| Skip | `src/**`, `lib/**`, `dist/**`, `node_modules/**`, test fixtures, generated files |
+
+This keeps the agent's working context small and focused on the question it actually needs to answer: *what commands install, build, test, and start this project?*
