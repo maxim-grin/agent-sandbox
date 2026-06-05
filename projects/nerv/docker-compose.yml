@@ -1,0 +1,89 @@
+# Nerv stack: Node/TypeScript worker + Redis.
+#
+# All Docker resources (network, workspace volume, results volume) are created
+# by run_job.sh before this compose file is invoked, so they are declared
+# external here. The supervisor passes RUN_ID, SANDBOX_NETWORK,
+# WORKSPACE_VOLUME, RESULTS_VOLUME, and WORKER_IMAGE as environment variables.
+
+services:
+  worker:
+    image: "${WORKER_IMAGE}"
+    container_name: "${RUN_ID}-nerv-worker-1"
+    networks:
+      - sandbox
+    volumes:
+      - workspace:/workspace
+      - results:/sandbox/results
+    working_dir: /workspace
+    environment:
+      CI: "true"
+      NODE_ENV: "test"
+      REDIS_URL: "redis://redis:6379"
+      NPM_CONFIG_UPDATE_NOTIFIER: "false"
+    depends_on:
+      redis:
+        condition: service_healthy
+    mem_limit: 1g
+    cpus: 2.0
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    user: sandboxuser
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "node", "--version"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    container_name: "${RUN_ID}-nerv-redis"
+    networks:
+      - sandbox
+    user: redis
+    # No persistence; clean state guaranteed per run.
+    # Use exec-form list to preserve the empty string argument for --save.
+    command:
+      - redis-server
+      - "--save"
+      - ""
+      - "--appendonly"
+      - "no"
+      - "--maxmemory"
+      - "96mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+      - "--bind"
+      - "0.0.0.0"
+      - "--protected-mode"
+      - "no"
+      - "--loglevel"
+      - "warning"
+    mem_limit: 128m
+    cpus: 0.5
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+networks:
+  sandbox:
+    external: true
+    name: "${SANDBOX_NETWORK}"
+
+volumes:
+  workspace:
+    external: true
+    name: "${WORKSPACE_VOLUME}"
+  results:
+    external: true
+    name: "${RESULTS_VOLUME}"

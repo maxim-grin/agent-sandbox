@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JobSpec",
+  "type": "object",
+  "required": ["project_type", "repo_url"],
+  "additionalProperties": false,
+  "properties": {
+    "project_type": {
+      "type": "string",
+      "description": "Maps to a directory under projects/. E.g. 'nerv'.",
+      "enum": ["nerv"]
+    },
+    "repo_url": {
+      "type": "string",
+      "description": "HTTPS URL of the git repository to clone."
+    },
+    "commit": {
+      "type": "string",
+      "description": "Branch name, tag, or full SHA to check out. Defaults to 'main'.",
+      "default": "main"
+    }
+  }
+}
