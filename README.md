@@ -39,10 +39,14 @@ Each subdirectory of `projects/` corresponds to a `project_type` value in the jo
 
 ```
 projects/
-└── nerv/
-    ├── docker-compose.yml   # worker + redis
+├── nerv/
+│   ├── docker-compose.yml   # worker + redis
+│   └── worker/
+│       └── Dockerfile       # Node 20, non-root user, TypeScript toolchain pre-installed
+└── medplum/
+    ├── docker-compose.yml   # worker + postgres + redis
     └── worker/
-        └── Dockerfile       # Node 20, non-root user, TypeScript toolchain pre-installed
+        └── Dockerfile       # Node 20, non-root user, pnpm pre-installed
 ```
 
 Adding a new stack means adding a new directory under `projects/` with a `docker-compose.yml` and a `worker/Dockerfile`. No changes to the supervisor are required.
@@ -53,6 +57,7 @@ Adding a new stack means adding a new directory under `projects/` with a `docker
 
 Jobs are described as a JSON file:
 
+**Nerv:**
 ```json
 {
   "project_type": "nerv",
@@ -61,9 +66,18 @@ Jobs are described as a JSON file:
 }
 ```
 
+**Medplum:**
+```json
+{
+  "project_type": "medplum",
+  "repo_url": "https://github.com/medplum/medplum",
+  "commit": "main"
+}
+```
+
 | Field          | Required | Description                                              |
 |----------------|----------|----------------------------------------------------------|
-| `project_type` | yes      | Maps to a directory under `projects/`                    |
+| `project_type` | yes      | Maps to a directory under `projects/`. `nerv` or `medplum` |
 | `repo_url`     | yes      | HTTPS URL of the git repository to clone                 |
 | `commit`       | no       | Branch, tag, or full SHA. Defaults to `main`             |
 
@@ -78,7 +92,7 @@ There are no `build_command`, `test_command`, or `run_command` fields. The sandb
 - Docker Engine 24+ with the Compose plugin
 - `jq`
 
-### Build and run
+### Build and run (Nerv)
 
 ```bash
 # 1. Create a job spec
@@ -92,6 +106,20 @@ EOF
 
 # 2. Start the job (builds images, creates volumes, starts supervisor)
 ./scripts/run_job.sh /tmp/nerv-job.json
+```
+
+### Build and run (Medplum)
+
+```bash
+cat > /tmp/medplum-job.json <<'EOF'
+{
+  "project_type": "medplum",
+  "repo_url": "https://github.com/medplum/medplum",
+  "commit": "main"
+}
+EOF
+
+./scripts/run_job.sh /tmp/medplum-job.json
 ```
 
 `run_job.sh` streams all supervisor output to your terminal and exits with the supervisor's exit code.
@@ -111,7 +139,7 @@ docker run --rm -v <run-id>-results:/r alpine sh -c 'ls /r/logs/'
 Once the sandbox is ready, the supervisor prints:
 
 ```
-SANDBOX_READY run_id=<id> worker=<id>-nerv-worker-1
+SANDBOX_READY run_id=<id> worker=<id>-<project_type>-worker-1
 ```
 
 From this point the AI harness drives the agent by writing commands to the supervisor's stdin:
@@ -156,6 +184,8 @@ The workspace volume is created empty by `run_job.sh` before the supervisor star
 
 Redis is started with `--save "" --appendonly no` — no RDB snapshots, no AOF log. All data is in-memory and disappears when the container stops.
 
+PostgreSQL (Medplum stack) uses a compose-managed volume (`pgdata`) that is **not** declared external. `docker compose down -v` removes it automatically, guaranteeing no database state leaks between runs.
+
 **There is no shared state between runs.** All resources are namespaced by `run-id`.
 
 ---
@@ -196,9 +226,12 @@ Redis is started with `--save "" --appendonly no` — no RDB snapshots, no AOF l
 |-----------|--------|-----|
 | Supervisor | 256 MB | 0.5 |
 | Nerv worker | 1 GB | 2.0 |
-| Redis | 128 MB | 0.5 |
+| Nerv Redis | 128 MB | 0.5 |
+| Medplum worker | 2 GB | 2.0 |
+| Medplum PostgreSQL | 512 MB | 1.0 |
+| Medplum Redis | 192 MB | 0.5 |
 
-Redis also enforces a soft cap via `--maxmemory 96mb` with the `allkeys-lru` eviction policy, so it never exceeds its container limit.
+Redis also enforces a soft cap via `--maxmemory` with the `allkeys-lru` eviction policy (96 MB for Nerv, 128 MB for Medplum) so it never exceeds its container limit. Medplum's worker is allocated more memory to accommodate TypeScript monorepo compilation.
 
 **What happens when limits are hit:**
 
@@ -231,6 +264,19 @@ Because the worker image is pre-built by `run_job.sh` before the supervisor star
 | `npm run build` | ~10s |
 | `npm test` | ~15s |
 | **Total (warm images, cold npm cache)** | **~65s** |
+
+### Observed timings (Medplum, cold start)
+
+| Phase | Approximate time |
+|-------|-----------------|
+| Build Medplum worker image (first time) | ~90s |
+| Build Medplum worker image (cached) | <2s |
+| PostgreSQL init + healthcheck | ~10s |
+| Clone Medplum repo | ~30s |
+| `pnpm install` — large monorepo (no cache) | ~120s |
+| `pnpm --filter @medplum/server build` | ~60s |
+| Migrations + `pnpm --filter @medplum/server test` | ~90s |
+| **Total (warm images, cold pnpm cache)** | **~5–7 min** |
 
 ### How to improve further
 
@@ -286,7 +332,11 @@ This sandbox is **not a CI pipeline**. It does not know how to build or test Ner
 
 The AI agent is responsible for reading `package.json`, deciding which scripts to run, executing them in the right order, and interpreting the results.
 
-Any script that infers build/test/run commands from `package.json` and executes them is a **harness simulation** — a demonstration of what an agent would do, not a required part of the sandbox.
+Any script that infers build/test/run commands from `package.json` (or `pnpm-workspace.yaml`) and executes them is a **harness simulation** — a demonstration of what an agent would do, not a required part of the sandbox.
+
+Included example harnesses:
+- `scripts/run_nerv_example.sh` — simulates an agent driving the Nerv (Node/Redis) stack
+- `scripts/run_medplum_example.sh` — simulates an agent driving the Medplum (Node/PostgreSQL/Redis) monorepo stack
 
 ### Guidance: limit repository inspection to build-relevant files
 

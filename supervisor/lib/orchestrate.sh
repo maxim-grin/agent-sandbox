@@ -29,7 +29,7 @@ teardown_stack() {
 }
 
 wait_for_stack() {
-  local worker="${RUN_ID}-nerv-worker-1"
+  local worker="${STACK_PROJECT}-worker-1"
   echo "[orchestrate] Waiting for worker: $worker"
   docker wait "$worker" 2>/dev/null || true
 }
