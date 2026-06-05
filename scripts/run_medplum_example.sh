@@ -67,7 +67,16 @@ cleanup() {
     alpine sh -c 'cp -r /r/. /out/ 2>/dev/null || true' 2>/dev/null || true
   cp "$SUP_LOG" "$HOST_RESULTS/supervisor.log" 2>/dev/null || true
 
-  log "Cleanup: removing containers, network, volumes..."
+  log "Cleanup: stopping all containers for run $RUN_ID..."
+  # Kill any containers started by this run (supervisor + compose stack).
+  # docker ps -q --filter name= matches on substring, so this catches all
+  # ${RUN_ID}-medplum-* compose containers and the supervisor itself.
+  mapfile -t run_containers < <(docker ps -q --filter "name=${RUN_ID}" 2>/dev/null)
+  if [[ ${#run_containers[@]} -gt 0 ]]; then
+    docker rm -f "${run_containers[@]}" 2>/dev/null || true
+  fi
+
+  log "Cleanup: removing network and volumes..."
   docker network rm "$NETWORK_NAME"    2>/dev/null || true
   docker volume rm "$RESULTS_VOLUME" "$WORKSPACE_VOLUME" 2>/dev/null || true
   rm -f "$CMD_PIPE" "$SUP_LOG"
@@ -237,8 +246,8 @@ log "Step 3: test @medplum/server"
 # process reaches the per-worker limit simultaneously. 4 workers × 900MB each
 # = 3.6GB potential but actual peak is lower because workers run different test
 # files in parallel and don't all peak at the same moment.
-send "EXEC test env NODE_OPTIONS=--max-old-space-size=900 npm --prefix packages/server test -- --testTimeout=60000 --forceExit --maxWorkers=4"
-wait_for "EXIT_CODE test" 600
+send "EXEC test env NODE_OPTIONS=--max-old-space-size=900 npm --prefix packages/server test -- --testTimeout=30000 --forceExit --maxWorkers=2"
+wait_for "EXIT_CODE test" 1800
 
 # ── Step 4: Start server in background inside worker ─────────────────────────
 log "Step 4: launch server in background"

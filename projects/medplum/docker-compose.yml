@@ -62,6 +62,17 @@ services:
       POSTGRES_PASSWORD: medplum
       # Subdirectory avoids permission conflicts with the volume mount point itself
       PGDATA: /var/lib/postgresql/data/pgdata
+    # Tune PostgreSQL to stay within the memory limit under heavy parallel test load.
+    # max_connections=50 prevents connection exhaustion with multiple jest workers.
+    # shared_buffers=256MB is the recommended starting point (25% of mem_limit).
+    command:
+      - postgres
+      - -c
+      - max_connections=50
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=8MB
     volumes:
       - pgdata:/var/lib/postgresql/data
     security_opt:
@@ -73,7 +84,7 @@ services:
       - SYS_ADMIN
       - SYS_MODULE
       - SYS_PTRACE
-    mem_limit: 512m
+    mem_limit: 1g
     cpus: 1.0
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U medplum -d medplum"]
