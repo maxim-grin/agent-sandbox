@@ -222,7 +222,9 @@ SHIM
 # expected in this sandbox environment. The core FHIR/server tests pass.
 # Migrations run automatically inside initApp() when tests call initAppServices().
 log "Step 3: test @medplum/server"
-send "EXEC test npm --prefix packages/server test -- --testTimeout=60000 --forceExit"
+# NODE_OPTIONS caps each Jest worker's V8 heap. With CI=true Jest defaults to
+# 2 workers; 512m × 2 = 1GB peak, well within the container's 2g mem_limit.
+send "EXEC test env NODE_OPTIONS=--max-old-space-size=512 npm --prefix packages/server test -- --testTimeout=60000 --forceExit"
 wait_for "EXIT_CODE test" 600
 
 # ── Step 4: Start server in background inside worker ─────────────────────────

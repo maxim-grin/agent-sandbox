@@ -13,8 +13,10 @@ sandbox_exec() {
   local cmd_str="$*"
   local log_file="$RESULTS/logs/${label}.log"
   local worker="${STACK_PROJECT}-worker-1"
+  local t0 t1
 
   echo "[exec] Running '$cmd_str' in $worker (log: $log_file)"
+  t0=$(date +%s)
 
   docker exec \
     --user sandboxuser \
@@ -25,6 +27,8 @@ sandbox_exec() {
     sh -c "$cmd_str" 2>&1 | tee "$log_file"
 
   local exit_code="${PIPESTATUS[0]}"
-  echo "[exec] '$label' exited: $exit_code"
+  t1=$(date +%s)
+  LAST_EXEC_DURATION=$(( t1 - t0 ))
+  echo "[exec] '$label' exited: $exit_code (${LAST_EXEC_DURATION}s)"
   return "$exit_code"
 }

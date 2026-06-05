@@ -11,6 +11,13 @@ BUILD_EXIT_CODE=255
 TEST_EXIT_CODE=255
 HEALTH_STATUS=0
 
+# Per-step tracking (populated during the command loop; read by write_result in capture.sh)
+STEP_LABELS=()
+STEP_CODES=()
+STEP_DURATIONS=()
+STEP_STATUSES=()
+LAST_EXEC_DURATION=0
+
 source /supervisor/lib/capture.sh
 source /supervisor/lib/clone.sh
 source /supervisor/lib/orchestrate.sh
@@ -100,6 +107,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       # commands in an || list are excluded from set -e / ERR trap.
       # shellcheck disable=SC2086
       code=0; sandbox_exec "$label" $cmd || code=$?
+      step_status="success"; [[ $code -ne 0 ]] && step_status="failure"
+      STEP_LABELS+=("$label")
+      STEP_CODES+=("$code")
+      STEP_DURATIONS+=("${LAST_EXEC_DURATION:-0}")
+      STEP_STATUSES+=("$step_status")
       case "$label" in
         build) BUILD_EXIT_CODE=$code ;;
         test)  TEST_EXIT_CODE=$code  ;;
@@ -110,8 +122,21 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     HEALTHCHECK)
       url="$rest"
       log "Probing healthcheck: $url"
+      hc_t0=$(date +%s)
+      # curl always writes %{http_code} before exiting; drop || echo 0 which
+      # caused double-output ("000" + "0" = "0000") on connection failure.
       HEALTH_STATUS=$(curl -s -o "$RESULTS/logs/healthcheck_response.json" \
-        -w "%{http_code}" --max-time 10 "$url" 2>/dev/null || echo 0)
+        -w "%{http_code}" --max-time 10 "$url" 2>/dev/null) || true
+      # Normalize curl's "000" (no HTTP response) to plain 0
+      [[ "$HEALTH_STATUS" == "000" || -z "$HEALTH_STATUS" ]] && HEALTH_STATUS=0
+      hc_t1=$(date +%s)
+      hc_dur=$(( hc_t1 - hc_t0 ))
+      hc_status="failure"
+      [[ "$HEALTH_STATUS" =~ ^2 ]] && hc_status="success"
+      STEP_LABELS+=("healthcheck")
+      STEP_CODES+=("$HEALTH_STATUS")
+      STEP_DURATIONS+=("$hc_dur")
+      STEP_STATUSES+=("$hc_status")
       echo "HEALTHCHECK_STATUS ${HEALTH_STATUS}"
       ;;
 
