@@ -1,0 +1,34 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Docker build cache / temp artifacts
+*.tar
+
+# Sandbox runtime output (generated per job run)
+/sandbox/
+results/
+workspace/
+run_results/
+
+# Secrets / env overrides
+.env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/

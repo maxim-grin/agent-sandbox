@@ -22,8 +22,16 @@ RESULTS_VOLUME="${RUN_ID}-results"
 WORKSPACE_VOLUME="${RUN_ID}-workspace"
 SUPERVISOR_IMAGE="ai-sandbox-supervisor"
 WORKER_IMAGE="ai-sandbox-${PROJECT_TYPE}-worker"
+HOST_RESULTS="$REPO_ROOT/run_results/$RUN_ID"
 
 cleanup() {
+  echo "[run_job] Persisting results → $HOST_RESULTS"
+  mkdir -p "$HOST_RESULTS"
+  docker run --rm \
+    -v "${RESULTS_VOLUME}:/r:ro" \
+    -v "${HOST_RESULTS}:/out" \
+    alpine sh -c 'cp -r /r/. /out/ 2>/dev/null || true' 2>/dev/null || true
+
   echo "[run_job] Cleaning up network and volumes: $NETWORK_NAME"
   docker network rm "$NETWORK_NAME" 2>/dev/null || true
   docker volume rm "$RESULTS_VOLUME" "$WORKSPACE_VOLUME" 2>/dev/null || true
@@ -86,7 +94,6 @@ else
   echo "[run_job] Job failed (exit code: $STATUS)." >&2
 fi
 
-echo "[run_job] Results volume: $RESULTS_VOLUME"
-echo "[run_job] Inspect:  docker run --rm -v ${RESULTS_VOLUME}:/r alpine sh -c 'cat /r/result.json'"
+echo "[run_job] Results will be saved to: $HOST_RESULTS"
 
 exit $STATUS

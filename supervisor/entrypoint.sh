@@ -110,7 +110,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     HEALTHCHECK)
       url="$rest"
       log "Probing healthcheck: $url"
-      HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$url" || echo 0)
+      HEALTH_STATUS=$(curl -s -o "$RESULTS/logs/healthcheck_response.json" \
+        -w "%{http_code}" --max-time 10 "$url" 2>/dev/null || echo 0)
       echo "HEALTHCHECK_STATUS ${HEALTH_STATUS}"
       ;;
 

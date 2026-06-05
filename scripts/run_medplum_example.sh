@@ -51,6 +51,7 @@ WORKER_IMAGE="ai-sandbox-medplum-worker"
 
 CMD_PIPE="/tmp/${RUN_ID}-cmds"
 SUP_LOG="/tmp/${RUN_ID}-sup.log"
+HOST_RESULTS="$REPO_ROOT/run_results/$RUN_ID"
 
 HEALTH_PORT=8103
 HEALTH_PATH="/healthcheck"
@@ -58,10 +59,18 @@ HEALTH_PATH="/healthcheck"
 log() { echo "[harness] $*"; }
 
 cleanup() {
+  log "Persisting results → $HOST_RESULTS"
+  mkdir -p "$HOST_RESULTS"
+  docker run --rm \
+    -v "${RESULTS_VOLUME}:/r:ro" \
+    -v "${HOST_RESULTS}:/out" \
+    alpine sh -c 'cp -r /r/. /out/ 2>/dev/null || true' 2>/dev/null || true
+  cp "$SUP_LOG" "$HOST_RESULTS/supervisor.log" 2>/dev/null || true
+
   log "Cleanup: removing containers, network, volumes..."
   docker network rm "$NETWORK_NAME"    2>/dev/null || true
   docker volume rm "$RESULTS_VOLUME" "$WORKSPACE_VOLUME" 2>/dev/null || true
-  rm -f "$CMD_PIPE"
+  rm -f "$CMD_PIPE" "$SUP_LOG"
 }
 trap cleanup EXIT
 
@@ -240,13 +249,7 @@ log "All steps complete. Sending DONE."
 send "DONE"
 wait $SUP_PID || true
 
-# ── Print results ──────────────────────────────────────────────────────────
-echo ""
-echo "============================================"
-echo " SUPERVISOR OUTPUT (last 40 lines)"
-echo "============================================"
-tail -40 "$SUP_LOG"
-
+# ── Print terminal summary ─────────────────────────────────────────────────
 echo ""
 echo "============================================"
 echo " result.json"
@@ -256,18 +259,18 @@ docker run --rm -v "${RESULTS_VOLUME}:/r" alpine sh -c 'cat /r/result.json' 2>/d
 
 echo ""
 echo "============================================"
-echo " build.log (tail 20)"
+echo " healthcheck response"
 echo "============================================"
-docker run --rm -v "${RESULTS_VOLUME}:/r" alpine sh -c 'cat /r/logs/build.log 2>/dev/null || echo "(not found)"' | tail -20
+docker run --rm -v "${RESULTS_VOLUME}:/r" alpine sh -c \
+  'cat /r/logs/healthcheck_response.json 2>/dev/null || echo "(not found)"'
 
 echo ""
 echo "============================================"
 echo " test.log (tail 30)"
 echo "============================================"
-docker run --rm -v "${RESULTS_VOLUME}:/r" alpine sh -c 'cat /r/logs/test.log 2>/dev/null || echo "(not found)"' | tail -30
+docker run --rm -v "${RESULTS_VOLUME}:/r" alpine sh -c \
+  'cat /r/logs/test.log 2>/dev/null || echo "(not found)"' | tail -30
 
 echo ""
-echo "============================================"
-echo " start-server.log"
-echo "============================================"
-docker run --rm -v "${RESULTS_VOLUME}:/r" alpine sh -c 'cat /r/logs/start-server.log 2>/dev/null || echo "(not found)"'
+log "Full run artifacts saved to: $HOST_RESULTS"
+log "  result.json, supervisor.log, logs/{install,build,test,start-server,healthcheck_response}.json"
