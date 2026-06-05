@@ -198,6 +198,11 @@ log "Step 1: npm install"
 send "EXEC install npm install"
 wait_for "EXIT_CODE install" 600
 
+# ── Step 1.5: Verify Postgres reachable (diagnose any config/network issues) ──
+log "Verifying Postgres connectivity from worker..."
+send "EXEC check-pg node -e \"const p=require('/workspace/node_modules/pg'); const c=new p.Client({host:'postgres',port:5432,user:'medplum',password:'medplum',database:'medplum'}); c.connect().then(()=>{console.log('Postgres OK');c.end()}).catch(e=>{console.error('Postgres FAIL:',e.code,e.message);process.exit(1)})\""
+wait_for "EXIT_CODE check-pg" 30
+
 # ── Step 2: Build the server package (and its workspace dependencies) ─────────
 # Medplum uses Turborepo. --filter=@medplum/server... builds the server and all
 # packages it depends on in dependency order (core, definitions, fhirpath, etc.).
@@ -228,16 +233,20 @@ SHIM
 # expected in this sandbox environment. The core FHIR/server tests pass.
 # Migrations run automatically inside initApp() when tests call initAppServices().
 log "Step 3: test @medplum/server"
-# Medplum's full server test suite requires ~2-3GB per Jest worker due to
-# in-process mock databases and accumulated module state. --maxWorkers=1
-# serialises test files to one process; 3500m fits safely within the
-# container's 4g mem_limit (Medplum recommends ≥4 GiB free RAM for tests).
-send "EXEC test env NODE_OPTIONS=--max-old-space-size=7000 npm --prefix packages/server test -- --testTimeout=60000 --forceExit --maxWorkers=1"
+# Multiple workers distribute module state across separate heaps so no single
+# process reaches the per-worker limit simultaneously. 4 workers × 900MB each
+# = 3.6GB potential but actual peak is lower because workers run different test
+# files in parallel and don't all peak at the same moment.
+send "EXEC test env NODE_OPTIONS=--max-old-space-size=900 npm --prefix packages/server test -- --testTimeout=60000 --forceExit --maxWorkers=4"
 wait_for "EXIT_CODE test" 600
 
 # ── Step 4: Start server in background inside worker ─────────────────────────
 log "Step 4: launch server in background"
-send "EXEC start-server node packages/server/dist/start.mjs"
+# Run from packages/server so the built index.js finds ./medplum.config.json
+# in its CWD (it opens the file relative to process.cwd(), not __dirname).
+# The trailing & exits the shell immediately so EXIT_CODE is emitted at once;
+# the server keeps running as a background process inside the container.
+send "EXEC start-server sh -c 'cd packages/server && node dist/start.mjs &'"
 wait_for "EXIT_CODE start-server" 15
 
 # Give the server time to bind and connect to PostgreSQL/Redis.
