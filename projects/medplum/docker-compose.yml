@@ -97,7 +97,7 @@ services:
       - "--maxmemory"
       - "128mb"
       - "--maxmemory-policy"
-      - "allkeys-lru"
+      - "noeviction"
       - "--bind"
       - "0.0.0.0"
       - "--protected-mode"

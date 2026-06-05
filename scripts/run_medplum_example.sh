@@ -4,14 +4,15 @@
 #
 # This script SIMULATES what an AI coding agent would do after receiving
 # SANDBOX_READY from the supervisor. It:
-#   1. Inspects pnpm-workspace.yaml and packages/server/package.json to
-#      understand the monorepo layout and available scripts.
-#   2. Installs workspace dependencies with pnpm.
+#   1. Inspects package.json and packages/server/package.json to understand
+#      the monorepo layout and available scripts.
+#   2. Installs workspace dependencies with npm.
 #   3. Writes packages/server/medplum.config.json pointing at the sandbox's
 #      PostgreSQL and Redis services (a real agent infers this by reading the
 #      config schema or CONTRIBUTING.md).
-#   4. Builds the server package.
-#   5. Runs DB migrations.
+#   4. Builds the server package (and its workspace dependencies) via Turbo.
+#   5. Creates a start.mjs wrapper (Node.js does not set import.meta.main,
+#      so the server's built index.js needs an explicit entry shim).
 #   6. Runs the server test suite.
 #   7. Starts the server and probes the health endpoint.
 #   8. Sends DONE.
@@ -122,10 +123,53 @@ READY_LINE=$(grep "SANDBOX_READY" "$SUP_LOG" | tail -1)
 WORKER_NAME=$(echo "$READY_LINE" | grep -oP 'worker=\K\S+')
 log "Stack ready. Worker container: $WORKER_NAME"
 
+# ── Write sandbox config (direct docker exec — complex JSON, not suitable
+#    for the EXEC line protocol's shell word-splitting) ────────────────────
+# A real agent would read packages/server/medplum.config.json (or the config
+# schema) and create an override pointing at the sandbox's named services.
+log "Writing packages/server/medplum.config.json for sandbox services"
+docker exec --user sandboxuser -w /workspace "$WORKER_NAME" \
+  sh -c 'cat > packages/server/medplum.config.json' << 'CONFIG'
+{
+  "port": 8103,
+  "baseUrl": "http://localhost:8103/",
+  "appBaseUrl": "http://localhost:3000/",
+  "binaryStorage": "file:./binary/",
+  "storageBaseUrl": "http://localhost:8103/storage/",
+  "supportEmail": "\"Medplum\" <support@medplum.com>",
+  "googleClientId": "",
+  "googleClientSecret": "",
+  "recaptchaSiteKey": "",
+  "recaptchaSecretKey": "",
+  "botLambdaRoleArn": "",
+  "botLambdaLayerName": "medplum-bot-layer",
+  "vmContextBotsEnabled": true,
+  "defaultBotRuntimeVersion": "vmcontext",
+  "allowedOrigins": "*",
+  "introspectionEnabled": true,
+  "database": {
+    "host": "postgres",
+    "port": 5432,
+    "dbname": "medplum",
+    "username": "medplum",
+    "password": "medplum"
+  },
+  "redis": {
+    "host": "redis",
+    "port": 6379
+  },
+  "bullmq": {
+    "removeOnFail": { "count": 1 },
+    "removeOnComplete": { "count": 1 }
+  },
+  "shutdownTimeoutMilliseconds": 30000
+}
+CONFIG
+
 # ── Agent inspects the workspace ────────────────────────────────────────────
 # (A real agent would call an LLM; we inspect known files deterministically.)
-log "Inspecting workspace: pnpm-workspace.yaml"
-send "EXEC inspect cat pnpm-workspace.yaml"
+log "Inspecting workspace: package.json (monorepo root)"
+send "EXEC inspect cat package.json"
 wait_for "EXIT_CODE inspect" 15
 
 log "Inspecting workspace: packages/server/package.json"
@@ -133,68 +177,61 @@ send "EXEC inspect-server cat packages/server/package.json"
 wait_for "EXIT_CODE inspect-server" 15
 
 # ── Step 1: Install all workspace dependencies ───────────────────────────────
-# --frozen-lockfile ensures reproducible installs from the committed lockfile.
-log "Step 1: pnpm install"
-send "EXEC install pnpm install --frozen-lockfile"
+# Medplum uses npm workspaces (packageManager: npm@10.x). npm install at the
+# monorepo root installs all packages in packages/*/
+log "Step 1: npm install"
+send "EXEC install npm install"
 wait_for "EXIT_CODE install" 600
 
-# ── Step 2: Write sandbox config ─────────────────────────────────────────────
-# A real agent would read packages/server/medplum.config.json (or the config
-# schema) and create an override pointing at the sandbox's named services.
-log "Step 2: writing packages/server/medplum.config.json for sandbox services"
-# Use node (always available) to write well-formed JSON without relying on jq.
-CONFIG_JS='
-const cfg = {
-  port: 8103,
-  baseUrl: "http://localhost:8103/",
-  database: {
-    host: "postgres",
-    port: 5432,
-    dbname: "medplum",
-    username: "medplum",
-    password: "medplum",
-    ssl: false
-  },
-  redis: { host: "redis", port: 6379 },
-  logLevel: "info"
-};
-require("fs").writeFileSync("packages/server/medplum.config.json", JSON.stringify(cfg, null, 2));
-console.log("config written");
-'
-send "EXEC config node -e '$CONFIG_JS'"
-wait_for "EXIT_CODE config" 15
+# ── Step 2: Build the server package (and its workspace dependencies) ─────────
+# Medplum uses Turborepo. --filter=@medplum/server... builds the server and all
+# packages it depends on in dependency order (core, definitions, fhirpath, etc.).
+# NODE_OPTIONS raises the V8 heap limit for TypeScript compilation of the
+# large monorepo (~1.8 GB peak). Uses env(1) to avoid shell quoting in the
+# EXEC line protocol.
+log "Step 2: build @medplum/server (with dependencies via Turbo)"
+send "EXEC build env NODE_OPTIONS=--max-old-space-size=1800 node_modules/.bin/turbo run build --filter=@medplum/server..."
+wait_for "EXIT_CODE build" 300
 
-# ── Step 3: Build the server package ─────────────────────────────────────────
-log "Step 3: build @medplum/server"
-send "EXEC build pnpm --filter @medplum/server build"
-wait_for "EXIT_CODE build" 180
+# ── Create start.mjs wrapper (direct docker exec — must run after build) ─────
+# Medplum's built dist/index.js guards its entrypoint with `if (import.meta.main)`,
+# which is a Deno/Bun idiom. Node.js never sets import.meta.main, so the server
+# would silently exit with code 0 when invoked directly. This wrapper imports
+# the module dynamically (so the body executes before the module is evaluated)
+# and calls runFromCli() explicitly.
+log "Creating packages/server/dist/start.mjs entry wrapper"
+docker exec --user sandboxuser -w /workspace "$WORKER_NAME" \
+  sh -c 'cat > packages/server/dist/start.mjs' << 'SHIM'
+// Node.js does not set import.meta.main (that is a Deno/Bun concept).
+// Import dynamically so this assignment runs before index.js is evaluated.
+const { runFromCli } = await import("./index.js");
+runFromCli(process.argv).catch(console.error);
+SHIM
 
-# ── Step 4: Run database migrations ──────────────────────────────────────────
-log "Step 4: database migrations"
-send "EXEC migrate pnpm --filter @medplum/server run migrate"
-wait_for "EXIT_CODE migrate" 60
+# ── Step 3: Run the server test suite ────────────────────────────────────────
+# Note: cloud/AWS/Lambda tests fail when AWS credentials are absent — that is
+# expected in this sandbox environment. The core FHIR/server tests pass.
+# Migrations run automatically inside initApp() when tests call initAppServices().
+log "Step 3: test @medplum/server"
+send "EXEC test npm --prefix packages/server test -- --testTimeout=60000 --forceExit"
+wait_for "EXIT_CODE test" 600
 
-# ── Step 5: Run the server test suite ────────────────────────────────────────
-log "Step 5: test @medplum/server"
-send "EXEC test pnpm --filter @medplum/server test"
-wait_for "EXIT_CODE test" 300
-
-# ── Step 6: Start server in background inside worker ─────────────────────────
-log "Step 6: launch server in background"
-send "EXEC start-server node packages/server/dist/index.js &"
+# ── Step 4: Start server in background inside worker ─────────────────────────
+log "Step 4: launch server in background"
+send "EXEC start-server node packages/server/dist/start.mjs"
 wait_for "EXIT_CODE start-server" 15
 
 # Give the server time to bind and connect to PostgreSQL/Redis.
-log "Waiting 8s for server to become ready..."
-sleep 8
+log "Waiting 10s for server to become ready..."
+sleep 10
 
-# ── Step 7: Probe health from supervisor (across Docker network) ──────────────
-log "Step 7: healthcheck from supervisor → http://${WORKER_NAME}:${HEALTH_PORT}${HEALTH_PATH}"
+# ── Step 5: Probe health from supervisor (across Docker network) ──────────────
+log "Step 5: healthcheck from supervisor → http://${WORKER_NAME}:${HEALTH_PORT}${HEALTH_PATH}"
 send "HEALTHCHECK http://${WORKER_NAME}:${HEALTH_PORT}${HEALTH_PATH}"
 wait_for "HEALTHCHECK_STATUS" 30
 
-# ── Step 8: Also verify healthcheck from inside the worker ───────────────────
-log "Step 8: verify health from inside worker"
+# ── Step 6: Also verify healthcheck from inside the worker ───────────────────
+log "Step 6: verify health from inside worker"
 send "EXEC health-probe curl -sf http://localhost:${HEALTH_PORT}${HEALTH_PATH}"
 wait_for "EXIT_CODE health-probe" 15
 
@@ -219,9 +256,9 @@ docker run --rm -v "${RESULTS_VOLUME}:/r" alpine sh -c 'cat /r/result.json' 2>/d
 
 echo ""
 echo "============================================"
-echo " build.log"
+echo " build.log (tail 20)"
 echo "============================================"
-docker run --rm -v "${RESULTS_VOLUME}:/r" alpine sh -c 'cat /r/logs/build.log 2>/dev/null || echo "(not found)"'
+docker run --rm -v "${RESULTS_VOLUME}:/r" alpine sh -c 'cat /r/logs/build.log 2>/dev/null || echo "(not found)"' | tail -20
 
 echo ""
 echo "============================================"

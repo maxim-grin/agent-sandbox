@@ -46,7 +46,7 @@ projects/
 └── medplum/
     ├── docker-compose.yml   # worker + postgres + redis
     └── worker/
-        └── Dockerfile       # Node 20, non-root user, pnpm pre-installed
+        └── Dockerfile       # Node 22, non-root user (Medplum ≥5.x requires Node 22+)
 ```
 
 Adding a new stack means adding a new directory under `projects/` with a `docker-compose.yml` and a `worker/Dockerfile`. No changes to the supervisor are required.
@@ -231,7 +231,9 @@ PostgreSQL (Medplum stack) uses a compose-managed volume (`pgdata`) that is **no
 | Medplum PostgreSQL | 512 MB | 1.0 |
 | Medplum Redis | 192 MB | 0.5 |
 
-Redis also enforces a soft cap via `--maxmemory` with the `allkeys-lru` eviction policy (96 MB for Nerv, 128 MB for Medplum) so it never exceeds its container limit. Medplum's worker is allocated more memory to accommodate TypeScript monorepo compilation.
+> **Note:** The Medplum worker uses Node 22 (not 20). Medplum ≥5.0 requires `node >=22.18.0`. The Nerv worker stays on Node 20.
+
+Redis also enforces a soft cap via `--maxmemory` (96 MB for Nerv, 128 MB for Medplum) so it never exceeds its container limit. Medplum's Redis uses `noeviction` policy (BullMQ's preferred setting); Nerv uses `allkeys-lru`. Medplum's worker is allocated more memory to accommodate TypeScript monorepo compilation.
 
 **What happens when limits are hit:**
 
@@ -273,14 +275,14 @@ Because the worker image is pre-built by `run_job.sh` before the supervisor star
 | Build Medplum worker image (cached) | <2s |
 | PostgreSQL init + healthcheck | ~10s |
 | Clone Medplum repo | ~30s |
-| `pnpm install` — large monorepo (no cache) | ~120s |
-| `pnpm --filter @medplum/server build` | ~60s |
-| Migrations + `pnpm --filter @medplum/server test` | ~90s |
+| `npm install` — large monorepo, 3000+ packages (no cache) | ~120s |
+| `turbo run build --filter=@medplum/server...` | ~90s |
+| Migrations (auto on first test run) + `npm test` in packages/server | ~90s |
 | **Total (warm images, cold pnpm cache)** | **~5–7 min** |
 
 ### How to improve further
 
-- **npm cache volume**: mount a persistent `npm-cache` volume at `/root/.npm` in the worker to avoid re-downloading packages across runs.
+- **npm cache volume**: mount a persistent `npm-cache` volume at `/home/sandboxuser/.npm` (Nerv) or `/tmp/.npm` (Medplum — non-root user writes to `/tmp`) to avoid re-downloading packages across runs.
 - **Warm worker pools**: pre-start a pool of idle worker containers with the workspace volume pre-populated (repo cloned, `npm install` done). An incoming job skips directly to build/test.
 - **MicroVM-based isolation**: replace Docker containers with Firecracker microVMs (e.g. via Kata Containers) for stronger isolation with comparable startup times (~125ms per VM).
 - **Registry mirror**: route `npm install` through a local Verdaccio registry to eliminate external network latency entirely.
