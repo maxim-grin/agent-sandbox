@@ -141,6 +141,27 @@ READY_LINE=$(grep "SANDBOX_READY" "$SUP_LOG" | tail -1)
 WORKER_NAME=$(echo "$READY_LINE" | grep -oP 'worker=\K\S+')
 log "Stack ready. Worker container: $WORKER_NAME"
 
+# ── Create test database and readonly user (direct docker exec on postgres) ──
+# Medplum's loadTestConfig() hardcodes dbname='medplum_test' and creates a
+# readonlyDatabase config using user 'medplum_test_readonly'. Both must exist
+# in PostgreSQL before tests run. We create them via psql now that PostgreSQL
+# is healthy and accepting connections.
+# Note: bind-mounting init scripts into postgres doesn't work when docker compose
+# runs inside a supervisor container (the path resolves to the supervisor's
+# filesystem, not the host's), so we use docker exec instead.
+POSTGRES_CONTAINER="${RUN_ID}-medplum-postgres"
+log "Creating medplum_test database and medplum_test_readonly user..."
+docker exec "$POSTGRES_CONTAINER" \
+  psql -U medplum -d medplum -c "CREATE DATABASE medplum_test;" 2>&1 || log "medplum_test already exists (ok)"
+docker exec "$POSTGRES_CONTAINER" \
+  psql -U medplum -d medplum -c "CREATE USER medplum_test_readonly WITH PASSWORD 'medplum_test_readonly';" 2>&1 || log "medplum_test_readonly already exists (ok)"
+docker exec "$POSTGRES_CONTAINER" \
+  psql -U medplum -d medplum_test \
+  -c "GRANT CONNECT ON DATABASE medplum_test TO medplum_test_readonly;
+      GRANT USAGE ON SCHEMA public TO medplum_test_readonly;
+      ALTER DEFAULT PRIVILEGES FOR ROLE medplum IN SCHEMA public GRANT SELECT ON TABLES TO medplum_test_readonly;" \
+  2>&1
+
 # ── Write sandbox config (direct docker exec — complex JSON, not suitable
 #    for the EXEC line protocol's shell word-splitting) ────────────────────
 # A real agent would read packages/server/medplum.config.json (or the config
@@ -190,6 +211,35 @@ docker exec --user sandboxuser -w /workspace "$WORKER_NAME" \
   sh -c 'node -e "JSON.parse(require(\"fs\").readFileSync(\"packages/server/medplum.config.json\",\"utf8\")); process.stdout.write(\"config OK\n\")"' \
   || { log "ERROR: medplum.config.json missing or invalid JSON"; exit 1; }
 
+# Write a test-database config used by the pre-test migration step below.
+# Medplum's loadTestConfig() hardcodes dbname='medplum_test'; migrations must
+# be run on that database before Jest is started (because loadTestConfig sets
+# runMigrations=false, expecting the schema to already be in place).
+log "Writing packages/server/medplum.test.config.json for test-database migrations"
+docker exec -i --user sandboxuser -w /workspace "$WORKER_NAME" \
+  sh -c 'cat > packages/server/medplum.test.config.json' << 'TESTCFG'
+{
+  "port": 8103,
+  "baseUrl": "http://localhost:8103/",
+  "appBaseUrl": "http://localhost:3000/",
+  "binaryStorage": "file:/tmp/medplum-test-binary/",
+  "storageBaseUrl": "http://localhost:8103/storage/",
+  "supportEmail": "\"Medplum\" <support@medplum.com>",
+  "database": {
+    "host": "postgres",
+    "port": 5432,
+    "dbname": "medplum_test",
+    "username": "medplum",
+    "password": "medplum",
+    "runMigrations": true
+  },
+  "redis": {
+    "host": "redis",
+    "port": 6379
+  }
+}
+TESTCFG
+
 # ── Agent inspects the workspace ────────────────────────────────────────────
 # (A real agent would call an LLM; we inspect known files deterministically.)
 log "Inspecting workspace: package.json (monorepo root)"
@@ -237,15 +287,21 @@ const { runFromCli } = await import("./index.js");
 runFromCli(process.argv).catch(console.error);
 SHIM
 
+# ── Step 2.5: Migrate the test database ────────────────────────────────────
+# Medplum's loadTestConfig() sets runMigrations=false, expecting the test
+# database schema to already exist when Jest starts. We run the migration here
+# using the test config (medplum_test database) so the schema is ready.
+# The migrate-main.ts script accepts the config identifier as argv[2].
+log "Step 2.5: migrate medplum_test database"
+send "EXEC migrate-test env NODE_OPTIONS=--max-old-space-size=1800 node_modules/.bin/tsx packages/server/src/migrations/migrate-main.ts file:packages/server/medplum.test.config.json"
+wait_for "EXIT_CODE migrate-test" 300
+
 # ── Step 3: Run the server test suite ────────────────────────────────────────
 # Note: cloud/AWS/Lambda tests fail when AWS credentials are absent — that is
 # expected in this sandbox environment. The core FHIR/server tests pass.
-# Migrations run automatically inside initApp() when tests call initAppServices().
+# POSTGRES_HOST=postgres is set in docker-compose so loadTestConfig() connects
+# to the postgres container (not localhost).
 log "Step 3: test @medplum/server"
-# Multiple workers distribute module state across separate heaps so no single
-# process reaches the per-worker limit simultaneously. 4 workers × 900MB each
-# = 3.6GB potential but actual peak is lower because workers run different test
-# files in parallel and don't all peak at the same moment.
 send "EXEC test env NODE_OPTIONS=--max-old-space-size=900 npm --prefix packages/server test -- --testTimeout=30000 --forceExit --maxWorkers=2"
 wait_for "EXIT_CODE test" 1800
 
@@ -259,8 +315,10 @@ send "EXEC start-server sh -c 'cd packages/server && node dist/start.mjs &'"
 wait_for "EXIT_CODE start-server" 15
 
 # Give the server time to bind and connect to PostgreSQL/Redis.
-log "Waiting 10s for server to become ready..."
-sleep 10
+# The server runs migrations on the medplum database on first start, which
+# can take 30-60 seconds on a fresh database. 60s gives comfortable headroom.
+log "Waiting 60s for server to become ready..."
+sleep 60
 
 # ── Step 5: Probe health from supervisor (across Docker network) ──────────────
 log "Step 5: healthcheck from supervisor → http://${WORKER_NAME}:${HEALTH_PORT}${HEALTH_PATH}"

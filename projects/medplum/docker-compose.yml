@@ -25,6 +25,11 @@ services:
       MEDPLUM_DATABASE_USERNAME: medplum
       MEDPLUM_DATABASE_PASSWORD: medplum
       DATABASE_URL: "postgresql://medplum:medplum@postgres:5432/medplum"
+      # Medplum's loadTestConfig() reads POSTGRES_HOST/POSTGRES_PORT to override
+      # the database.host/port fields in the test config. Without these, tests
+      # fall back to 'localhost' (the worker container's loopback) and get ECONNREFUSED.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
       # Redis
       MEDPLUM_REDIS_HOST: redis
       MEDPLUM_REDIS_PORT: "6379"
