@@ -137,7 +137,7 @@ log "Stack ready. Worker container: $WORKER_NAME"
 # A real agent would read packages/server/medplum.config.json (or the config
 # schema) and create an override pointing at the sandbox's named services.
 log "Writing packages/server/medplum.config.json for sandbox services"
-docker exec --user sandboxuser -w /workspace "$WORKER_NAME" \
+docker exec -i --user sandboxuser -w /workspace "$WORKER_NAME" \
   sh -c 'cat > packages/server/medplum.config.json' << 'CONFIG'
 {
   "port": 8103,
@@ -175,6 +175,12 @@ docker exec --user sandboxuser -w /workspace "$WORKER_NAME" \
 }
 CONFIG
 
+# Verify the config was written correctly (non-empty, valid JSON).
+log "Verifying medplum.config.json..."
+docker exec --user sandboxuser -w /workspace "$WORKER_NAME" \
+  sh -c 'node -e "JSON.parse(require(\"fs\").readFileSync(\"packages/server/medplum.config.json\",\"utf8\")); process.stdout.write(\"config OK\n\")"' \
+  || { log "ERROR: medplum.config.json missing or invalid JSON"; exit 1; }
+
 # ── Agent inspects the workspace ────────────────────────────────────────────
 # (A real agent would call an LLM; we inspect known files deterministically.)
 log "Inspecting workspace: package.json (monorepo root)"
@@ -209,7 +215,7 @@ wait_for "EXIT_CODE build" 300
 # the module dynamically (so the body executes before the module is evaluated)
 # and calls runFromCli() explicitly.
 log "Creating packages/server/dist/start.mjs entry wrapper"
-docker exec --user sandboxuser -w /workspace "$WORKER_NAME" \
+docker exec -i --user sandboxuser -w /workspace "$WORKER_NAME" \
   sh -c 'cat > packages/server/dist/start.mjs' << 'SHIM'
 // Node.js does not set import.meta.main (that is a Deno/Bun concept).
 // Import dynamically so this assignment runs before index.js is evaluated.
@@ -222,9 +228,11 @@ SHIM
 # expected in this sandbox environment. The core FHIR/server tests pass.
 # Migrations run automatically inside initApp() when tests call initAppServices().
 log "Step 3: test @medplum/server"
-# NODE_OPTIONS caps each Jest worker's V8 heap. With CI=true Jest defaults to
-# 2 workers; 512m × 2 = 1GB peak, well within the container's 2g mem_limit.
-send "EXEC test env NODE_OPTIONS=--max-old-space-size=512 npm --prefix packages/server test -- --testTimeout=60000 --forceExit"
+# Medplum's full server test suite requires ~2-3GB per Jest worker due to
+# in-process mock databases and accumulated module state. --maxWorkers=1
+# serialises test files to one process; 3500m fits safely within the
+# container's 4g mem_limit (Medplum recommends ≥4 GiB free RAM for tests).
+send "EXEC test env NODE_OPTIONS=--max-old-space-size=7000 npm --prefix packages/server test -- --testTimeout=60000 --forceExit --maxWorkers=1"
 wait_for "EXIT_CODE test" 600
 
 # ── Step 4: Start server in background inside worker ─────────────────────────

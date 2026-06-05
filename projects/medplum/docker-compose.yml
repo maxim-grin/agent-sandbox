@@ -30,12 +30,13 @@ services:
       MEDPLUM_REDIS_PORT: "6379"
       REDIS_URL: "redis://redis:6379"
       NPM_CONFIG_UPDATE_NOTIFIER: "false"
+      TURBO_TELEMETRY_DISABLED: "1"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    mem_limit: 2g
+    mem_limit: 8g
     cpus: 2.0
     security_opt:
       - no-new-privileges:true
