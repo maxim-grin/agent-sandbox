@@ -8,7 +8,7 @@
     "project_type": {
       "type": "string",
       "description": "Maps to a directory under projects/. E.g. 'nerv'.",
-      "enum": ["nerv", "medplum"]
+      "enum": ["nerv", "medplum", "eshoponweb"]
     },
     "repo_url": {
       "type": "string",

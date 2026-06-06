@@ -1,0 +1,62 @@
+# eShopOnWeb stack: .NET/C# worker only — no SQL Server.
+#
+# SQL Server has no ARM64 image and cannot run on Apple Silicon. eShopOnWeb
+# supports an in-memory database mode (UseOnlyInMemoryDatabase=true) which is
+# sufficient for build validation, test execution, and health-check probing.
+#
+# All Docker resources (network, workspace volume, results volume) are created
+# by run_job.sh before this compose file is invoked, so they are declared
+# external here. The supervisor passes RUN_ID, SANDBOX_NETWORK,
+# WORKSPACE_VOLUME, RESULTS_VOLUME, and WORKER_IMAGE as environment variables.
+
+services:
+  worker:
+    image: "${WORKER_IMAGE}"
+    container_name: "${RUN_ID}-eshoponweb-worker-1"
+    networks:
+      - sandbox
+    volumes:
+      - workspace:/workspace
+      - results:/sandbox/results
+    working_dir: /workspace
+    environment:
+      CI: "true"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+      # Use in-memory EF Core databases instead of SQL Server.
+      # Checked by Dependencies.ConfigureLocalDatabaseContexts() in
+      # src/Infrastructure/Dependencies.cs.
+      UseOnlyInMemoryDatabase: "true"
+      # Bind the web app to HTTP only on all interfaces so the supervisor
+      # can health-check it across the Docker network. No HTTPS certificate
+      # is configured; HttpsRedirectionMiddleware skips redirection when no
+      # HTTPS port is resolvable.
+      ASPNETCORE_URLS: "http://0.0.0.0:5000"
+      ASPNETCORE_ENVIRONMENT: "Development"
+    mem_limit: 2g
+    cpus: 2.0
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    user: sandboxuser
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "dotnet", "--version"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  sandbox:
+    external: true
+    name: "${SANDBOX_NETWORK}"
+
+volumes:
+  workspace:
+    external: true
+    name: "${WORKSPACE_VOLUME}"
+  results:
+    external: true
+    name: "${RESULTS_VOLUME}"
