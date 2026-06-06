@@ -5,6 +5,41 @@
 - Do not scan the `.git` directory — it contains no useful information for this project.
 - When using Bash to read logs or large files, pipe through `head`, `tail`, or `grep` to keep output small. Never `cat` large files — use `Read` with `offset`/`limit` instead.
 
+## Agent Guidance: Using the Sandbox
+
+This sandbox is **not a CI pipeline**. It provides an isolated environment, a cloned workspace, and a way to execute arbitrary commands. The agent is responsible for reading project manifests, deciding which commands to run, and interpreting the results.
+
+### Workspace inspection
+
+When inspecting a cloned repo, **avoid a full recursive scan**. Target only files that directly describe how the project is built, tested, and run:
+
+| Priority | Files to read |
+|----------|--------------|
+| Always | `package.json` / `Cargo.toml` / `pyproject.toml` (or equivalent manifest) |
+| Always | `Dockerfile`, `docker-compose.yml`, `.dockerignore` |
+| Always | `README.md`, `CONTRIBUTING.md` (top-level only) |
+| If present | `tsconfig.json`, `jest.config.*`, `vitest.config.*`, `Makefile`, `.env.example` |
+| If present | CI config (`.github/workflows/`, `.gitlab-ci.yml`) |
+| Skip | `src/**`, `lib/**`, `dist/**`, `node_modules/**`, test fixtures, generated files |
+
+Reading every source file adds noise, bloats context, and risks pulling in application-domain details irrelevant to building and running the project.
+
+### Driving the sandbox
+
+Once `SANDBOX_READY` is printed, write commands to the supervisor's stdin:
+
+- `EXEC <label> <cmd> [args...]` — run a command in the worker; output goes to `logs/<label>.log`
+- `HEALTHCHECK <url>` — curl the URL and record the HTTP status
+- `DONE` — signal success; supervisor writes `result.json` and tears down
+
+The supervisor replies with `EXIT_CODE <label> <code>` after each `EXEC`. Branch on non-zero codes before continuing.
+
+### Interpreting failures
+
+- Exit code **137** from a worker container = OOM kill. The job needs more memory or a leaner build step.
+- Non-zero `test_exit_code` in `result.json` = tests failed; read `logs/test.log`.
+- `healthcheck_status` other than 200 = service did not start correctly; read `logs/run.log`.
+
 You are helping design and implement a **Docker-based AI agent sandbox**.
 
 This sandbox is an **execution environment for AI coding agents**, not a traditional CI pipeline. It must be generic enough to support multiple technology stacks in the future, but in this exercise it will be **validated against a single real project**:
