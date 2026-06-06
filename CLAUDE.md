@@ -2,19 +2,19 @@
 
 ## General Notes
 
-- Do not scan the `.git` directory — it contains no useful information for this project.
-- When using Bash to read logs or large files, pipe through `head`, `tail`, or `grep` to keep output small. Never `cat` large files — use `Read` with `offset`/`limit` instead.
+- Don't scan `.git` — no useful info there.
+- Pipe Bash log reads through `head`, `tail`, or `grep`. Never `cat` large files — use `Read` with `offset`/`limit`.
 
 ## Pipeline Run Procedure
 
-When running a pipeline end-to-end:
-1. Do a **single run**.
-2. Share a concise report: what passed, what failed, root causes, and concrete fix options.
-3. **Stop** — do not immediately re-run with a fix applied. Ask the user whether to implement the fixes and run again.
+End-to-end pipeline run:
+1. **Single run** only.
+2. Concise report: passed, failed, root causes, fix options.
+3. **Stop** — don't re-run with fix applied. Ask user first.
 
 ## Adding a New Project Stack
 
-Create three things — no supervisor changes needed.
+Three things to create — no supervisor changes needed.
 
 ### 1. `projects/<type>/worker/Dockerfile`
 
@@ -81,25 +81,25 @@ volumes:
 
 ### 3. Schema + example script
 
-- Add `"<type>"` to the `project_type` enum in `schemas/job_spec.schema.json`.
-- Add `scripts/run_<type>_example.sh` following the pattern of existing example scripts: build images, create Docker resources, start supervisor, send EXEC/HEALTHCHECK/DONE commands, print result summary.
+- Add `"<type>"` to `project_type` enum in `schemas/job_spec.schema.json`.
+- Add `scripts/run_<type>_example.sh` matching existing example scripts: build images, create Docker resources, start supervisor, send EXEC/HEALTHCHECK/DONE commands, print result summary.
 
 ### Key invariants
 
-- **Container name** must be `${RUN_ID}-<type>-worker-1`. The supervisor hardcodes this pattern in `orchestrate.sh` when waiting for the worker healthcheck and in `exec.sh` when routing `EXEC` commands.
-- **Network and volumes are external** — created by the harness before compose runs, destroyed after. Never declare them as `driver: local` in the compose file.
-- **Non-root only** — all agent commands run as `sandboxuser` (UID 1001). Ensure the runtime image supports non-root execution; some base images need extra setup (e.g. `chmod` on global tool dirs).
-- **EXEC word-splitting** — `sandbox_exec` joins everything after the label with `$*` and passes it to `sh -c`. Shell operators (`&`, `&&`, pipes) work. Arguments with internal spaces must use `env VAR=val cmd` form or `sh -c '...'` quoting rather than `export VAR && cmd`.
+- **Container name** must be `${RUN_ID}-<type>-worker-1`. Supervisor hardcodes this in `orchestrate.sh` (worker healthcheck) and `exec.sh` (EXEC routing).
+- **Network and volumes are external** — harness creates before compose, destroys after. Never `driver: local` in compose file.
+- **Non-root only** — agent commands run as `sandboxuser` (UID 1001). Verify runtime image supports non-root; some base images need extra setup (e.g. `chmod` on global tool dirs).
+- **EXEC word-splitting** — `sandbox_exec` joins everything after label with `$*`, passes to `sh -c`. Shell operators (`&`, `&&`, pipes) work. Args with internal spaces need `env VAR=val cmd` or `sh -c '...'` quoting, not `export VAR && cmd`.
 
 ---
 
 ## Agent Guidance: Using the Sandbox
 
-This sandbox is **not a CI pipeline**. It provides an isolated environment, a cloned workspace, and a way to execute arbitrary commands. The agent is responsible for reading project manifests, deciding which commands to run, and interpreting the results.
+Sandbox is **not a CI pipeline**. Isolated env + cloned workspace + arbitrary command execution. Agent reads manifests, decides commands, interprets results.
 
 ### Workspace inspection
 
-When inspecting a cloned repo, **avoid a full recursive scan**. Target only files that directly describe how the project is built, tested, and run:
+Avoid full recursive scan. Target only files describing build/test/run:
 
 | Priority | Files to read |
 |----------|--------------|
@@ -110,158 +110,119 @@ When inspecting a cloned repo, **avoid a full recursive scan**. Target only file
 | If present | CI config (`.github/workflows/`, `.gitlab-ci.yml`) |
 | Skip | `src/**`, `lib/**`, `dist/**`, `node_modules/**`, test fixtures, generated files |
 
-Reading every source file adds noise, bloats context, and risks pulling in application-domain details irrelevant to building and running the project.
+Reading every source file adds noise, bloats context, pulls in irrelevant details.
 
 ### Driving the sandbox
 
-Once `SANDBOX_READY` is printed, write commands to the supervisor's stdin:
+Once `SANDBOX_READY` prints, write commands to supervisor stdin:
 
-- `EXEC <label> <cmd> [args...]` — run a command in the worker; output goes to `logs/<label>.log`
-- `HEALTHCHECK <url>` — curl the URL and record the HTTP status
+- `EXEC <label> <cmd> [args...]` — run command in worker; output → `logs/<label>.log`
+- `HEALTHCHECK <url>` — curl URL, record HTTP status
 - `DONE` — signal success; supervisor writes `result.json` and tears down
 
-The supervisor replies with `EXIT_CODE <label> <code>` after each `EXEC`. Branch on non-zero codes before continuing.
+Supervisor replies `EXIT_CODE <label> <code>` after each `EXEC`. Branch on non-zero before continuing.
 
 ### Interpreting failures
 
-- Exit code **137** from a worker container = OOM kill. The job needs more memory or a leaner build step.
+- Exit code **137** = OOM kill. Needs more memory or leaner build.
 - Non-zero `test_exit_code` in `result.json` = tests failed; read `logs/test.log`.
-- `healthcheck_status` other than 200 = service did not start correctly; read `logs/run.log`.
+- `healthcheck_status` not 200 = service didn't start; read `logs/run.log`.
 
-You are helping design and implement a **Docker-based AI agent sandbox**.
+Design and implement a **Docker-based AI agent sandbox**.
 
-This sandbox is an **execution environment for AI coding agents**, not a traditional CI pipeline. It must be generic enough to support multiple technology stacks in the future, but in this exercise it will be **validated against a single real project**:
+Sandbox is **execution env for AI coding agents**, not CI. Generic enough for multiple stacks, validated against one real project:
 
 - Project: **Nerv**
 - Repo: `https://github.com/maxim-grin/nerv`
 - Stack: **TypeScript / Node.js / Redis**
-- “Works” definition:
+- "Works" means:
   - Server builds and starts
-  - Redis is available and working
-  - API responds to a health check
+  - Redis available and working
+  - API responds to health check
   - Test suite passes
 
-The design priorities are:
+Design priorities:
 
 - **Single sandbox + pluggable stack images**
 - **Separate data services per stack**
 - **Clean state per run**
 - **Non-interactive execution**
 - **Structured output capture**
-- Go deep on:
-  - **Security and isolation**
-  - **Resource management**
-  - **Build performance**
+- Go deep on: **Security/isolation**, **resource management**, **build performance**
 
 ---
 
 ## High-Level Architecture (Fixed Decisions)
 
-These are already decided and must be respected.
+Already decided — must be respected.
 
 ### 1. Single sandbox + pluggable workers
 
-- From the AI harness’s perspective, there is **one sandbox type** that can be configured per job.
-- Internally, the sandbox consists of:
-  - A **generic “supervisor” container** (stack-agnostic).
-  - One or more **pluggable “worker” / stack containers** (start with Nerv’s Node+Redis stack).
-- The supervisor knows **how to run a job**, not **how to build Nerv specifically**.
+- AI harness sees **one sandbox type**, configurable per job.
+- Internally: **generic supervisor** (stack-agnostic) + **pluggable worker/stack containers**.
+- Supervisor knows **how to run a job**, not **how to build Nerv**.
 
 ### 2. Separate data services per stack
 
-- The Nerv stack includes its own **Redis** container.
-- Future stacks (e.g., Postgres, SQL Server, etc.) would get their **own DB/service containers**.
-- No shared databases between unrelated projects or between runs.
+- Nerv stack has own **Redis** container.
+- Future stacks get **own DB/service containers**.
+- No shared databases between projects or runs.
 
 ### 3. Clean state per run (must-have)
 
-- Each job run must start from a **clean workspace** and **clean data state**:
-  - No leftover source code.
-  - No leftover Redis data.
-- It must be easy to:
-  - Spin up a fresh sandbox for a job.
-  - Tear it down or reset deterministically and quickly.
+Each run starts from **clean workspace** and **clean data**:
+- No leftover source code.
+- No leftover Redis data.
+- Easy to spin up fresh, tear down deterministically.
 
 ### 4. Non-interactive execution (must-have)
 
-- Everything must run **headlessly**:
-  - No interactive prompts.
-  - No wizards.
-  - No manual license dialogs.
-- Any tools that are normally interactive must be configured with flags/env vars to run non-interactively.
+Everything runs **headlessly** — no prompts, wizards, or license dialogs. Interactive tools must use flags/env vars.
 
 ### 5. Structured output capture (must-have)
 
-- Build and test results must be exposed in a **machine-readable way**, not just terminal logs.
-- At minimum:
-  - Clear **exit codes** for the overall job.
-  - A **JSON result file** with status and summary.
-  - Logs written to known paths.
+Machine-readable results:
+- Clear **exit codes**.
+- **JSON result file** with status/summary.
+- Logs at known paths.
 
 ### 6. Depth areas
 
-You should go **deeper than usual** on:
-
-- **Security and isolation** (sandboxing untrusted code).
-- **Resource management** (CPU, memory, disk).
-- **Build performance** (startup time, caching, multi-stage builds).
+Go deeper than usual on: **security/isolation**, **resource management**, **build performance**.
 
 ---
 
 ## Responsibilities: Sandbox vs AI Agent
 
-This separation is critical.
+Critical separation.
 
 ### Sandbox responsibilities
 
-The **sandbox** is responsible for:
-
-- Providing an **isolated, reproducible environment**:
-  - Supervisor + stack-specific worker containers.
-  - A dedicated Docker network and volumes per run.
-- Providing tools and services for the Nerv stack:
-  - Node.js / TypeScript toolchain.
-  - Redis.
-- Managing **lifecycle and clean state** for each run:
-  - Fresh workspace.
-  - Fresh Redis data.
-- Enforcing:
-  - **Non-interactive execution.**
-  - **Security and isolation controls.**
-  - **Resource limits** (CPU, memory, disk).
-- Capturing:
-  - Logs (build/test/run).
-  - A structured `result.json`.
+- **Isolated, reproducible env**: supervisor + stack worker containers, dedicated Docker network + volumes per run.
+- Tools/services for Nerv: Node.js/TypeScript toolchain, Redis.
+- **Lifecycle + clean state**: fresh workspace, fresh Redis per run.
+- Enforce: non-interactive, security/isolation, resource limits.
+- Capture: logs, structured `result.json`.
 
 ### AI agent responsibilities
 
-The **AI coding agent / harness** is responsible for:
-
-- Inspecting the repository contents (inside the sandbox workspace), including:
-  - `package.json`
-  - `Dockerfile`
-  - `docker-compose.yml` (if present)
-  - Any other relevant docs
-- **Figuring out how to:**
-  - Install dependencies.
-  - Build the project.
-  - Run tests.
-  - Start the service and probe a healthcheck.
-- Deciding which concrete shell commands to run, in what order.
-- Executing those commands inside the sandbox (via the supervisor’s execution entrypoint).
-- Interpreting the logs/result JSON and deciding what to do next.
+- Inspect repo contents in sandbox workspace (`package.json`, `Dockerfile`, `docker-compose.yml`, docs).
+- **Figure out** how to install deps, build, run tests, start service, probe healthcheck.
+- Decide concrete shell commands and order.
+- Execute via supervisor's execution entrypoint.
+- Interpret logs/result JSON and decide next steps.
 
 > Important:  
-> **The sandbox must not hard-code any project-specific build/test/run commands (e.g., `npm run build`, `npm test`, `npm start`).**  
-> The sandbox exposes an environment and a way to run arbitrary commands; the AI agent chooses the commands based on `package.json`, Dockerfile, and existing project conventions.
+> **Sandbox must not hard-code project-specific build/test/run commands (e.g., `npm run build`, `npm test`, `npm start`).**  
+> Sandbox exposes env + arbitrary command execution; agent chooses commands based on `package.json`, Dockerfile, project conventions.
 
 ---
 
 ## Job Spec and Lifecycle
 
-Define a **minimal job spec** that the supervisor can accept (passed as a JSON file or environment variables).
+Minimal job spec accepted by supervisor (JSON file or env vars).
 
-Example job spec:
+Example:
 
 ```json
 {
@@ -271,80 +232,48 @@ Example job spec:
 }
 ```
 
-Notes:
-
-- There are **no `build_command` / `test_command` / `run_command` fields**.
-- The job spec only tells the sandbox:
-  - What kind of stack to provision (`project_type`).
-  - Which repo and commit to clone.
-- After the repo is cloned into the workspace, the AI agent is expected to:
-  - Read `package.json`, Dockerfile, and any relevant files.
-  - Decide which commands to run for build/test/run.
-  - Execute them using the sandbox’s execution capability.
+No `build_command`/`test_command`/`run_command` fields. Spec only tells sandbox: stack type, repo, commit. Agent then reads files and decides commands.
 
 ### Supervisor responsibilities
 
-The **supervisor container** must:
+1. Accept job spec.
+2. Ensure **clean workspace** (e.g., `/sandbox/workspace`).
+3. Clone repo at specified commit.
+4. Select worker stack from `project_type`.
+5. Orchestrate worker/Redis containers.
+6. Provide arbitrary command execution in worker.
+7. Capture logs, produce structured result.
+8. Exit with clear success/failure code.
 
-1. Accept a job spec.
-2. Ensure a **clean workspace** for the run (e.g., `/sandbox/workspace`).
-3. Clone the repo at the specified commit into the workspace.
-4. Select the appropriate worker stack based on `project_type`.
-5. Orchestrate the worker/Redis containers (e.g., via `docker-compose` or `docker run`).
-6. Provide a way for an AI agent (or a simple driver script in this exercise) to:
-   - Run arbitrary commands inside the worker container.
-7. Capture logs and produce a structured result:
-   - Logs and `result.json` in a known location.
-8. Exit with a clear success/failure status code.
-
-You may include a **simple driver script** (e.g., `run_nerv_example.sh`) that imitates what an agent would do by:
-
-- Reading `package.json` to find `build`, `test`, `start` scripts.
-- Running those commands in sequence.
-
-This script must be clearly labeled in the README as an **example harness**, not core sandbox behavior.
+Include **simple driver script** (e.g., `run_nerv_example.sh`) imitating agent behavior — reads `package.json`, runs build/test/start in sequence. Must be labeled **example harness**, not core sandbox behavior.
 
 ---
 
 ## Workers: Nerv Stack
 
-Implement a **Nerv stack worker** that provides:
+Nerv stack worker provides: Node.js/TypeScript toolchain, Redis reachable at known host/port, arbitrary command execution.
 
-- Node.js / TypeScript build and test tooling.
-- A Redis container reachable at a known host/port.
-- Ability to run arbitrary commands supplied by the agent/supervisor.
-
-Acceptable implementation patterns:
-
-- `docker-compose.nerv.yml` with:
-  - `nerv-worker` service.
-  - `redis` service.
-- Or:
-  - A dedicated worker image started with `docker run`, plus a separate Redis container on the same network.
+Acceptable patterns:
+- `docker-compose.nerv.yml` with `nerv-worker` + `redis` services.
+- Or: dedicated worker image via `docker run` + separate Redis on same network.
 
 Capabilities:
-
-- Run typical Node/TypeScript commands like:
-  - `npm install`
-  - `npm run build`
-  - `npm test`
-  - `npm start`
-- Respond to a health check (e.g., HTTP GET to a URL the agent discovers from Dockerfile or code/docs).
-- Run non-interactively.
+- `npm install`, `npm run build`, `npm test`, `npm start`
+- Respond to health check.
+- Non-interactive.
 
 ---
 
 ## Results and Logs
 
-Define a standard results layout, for example:
+Standard layout:
 
-- Base: `/sandbox/results`
-  - `/sandbox/results/logs/build.log`
-  - `/sandbox/results/logs/test.log`
-  - `/sandbox/results/logs/run.log` (if applicable)
-  - `/sandbox/results/result.json`
+- `/sandbox/results/logs/build.log`
+- `/sandbox/results/logs/test.log`
+- `/sandbox/results/logs/run.log`
+- `/sandbox/results/result.json`
 
-`result.json` should at least contain:
+`result.json` minimum:
 
 ```json
 {
@@ -356,136 +285,79 @@ Define a standard results layout, for example:
 }
 ```
 
-Requirements:
-
-- Every job run must produce a `result.json` and logs.
-- The supervisor’s main process exit code must reflect overall job success/failure.
-- An external AI harness should be able to mount/read `/sandbox/results`.
+Every run must produce `result.json` + logs. Supervisor exit code reflects overall success. External harness mounts/reads `/sandbox/results`.
 
 ---
 
 ## Clean State
 
-Each job must start from a known-clean state:
+Each run from known-clean state — no leftover workspace, no leftover Redis data.
 
-- No leftover workspace contents.
-- No leftover Redis data.
-
-Acceptable approaches:
-
-- Use throwaway containers and volumes per run and then destroy them.
-- Or implement explicit reset logic that reliably clears workspace and data.
-
-Document in `README.md`:
-
-- How to start a new job run.
-- How you guarantee there is no state leakage between runs.
+Options: throwaway containers/volumes per run, or explicit reset logic. Document in `README.md`: how to start new run, how state leakage is prevented.
 
 ---
 
 ## Security and Isolation
 
-Treat the code running in the worker as **untrusted**.
+Treat worker code as **untrusted**.
 
-Minimum expectations:
+Minimums:
+- **Filesystem**: limit mounts to workspace + results. No host filesystem beyond that.
+- **Network**: dedicated Docker network. Restrict external outbound where reasonable.
+- **Container hardening**: non-root, drop unnecessary Linux capabilities, `no-new-privileges`.
 
-- File system:
-  - Limit container mounts to what is needed (workspace, results).
-  - No direct access to host filesystem beyond these.
-- Network:
-  - Use a dedicated Docker network for the sandbox.
-  - Restrict external outbound access as reasonable for the exercise.
-- Container hardening:
-  - Run as non-root where feasible.
-  - Drop unnecessary Linux capabilities.
-  - Consider `no-new-privileges`.
-
-If the supervisor needs to orchestrate containers:
-
-- Minimize exposure of the host Docker socket.
-- Document any tradeoffs (e.g., using Docker socket vs. sidecar approaches).
-- Call out remaining risks and how you would harden this in production.
+If supervisor orchestrates containers:
+- Minimize host Docker socket exposure.
+- Document tradeoffs (Docker socket vs. sidecar).
+- Call out remaining risks + production hardening path.
 
 ---
 
 ## Resource Management
 
-Implement and document resource controls:
+Implement and document:
+- Per-container CPU/memory limits for supervisor, Nerv worker, Redis.
+- Ephemeral volumes where possible. Avoid unbounded logs.
 
-- Per-container CPU/memory limits for:
-  - Supervisor.
-  - Nerv worker.
-  - Redis.
-- Disk considerations:
-  - Ephemeral volumes where possible.
-  - Avoid unbounded logs.
-
-Document:
-
-- What happens when builds/tests hit resource limits.
-- How an AI harness can interpret resource-related failures (e.g., OOM, timeouts).
+Document: what happens when builds/tests hit limits, how harness interprets resource failures (OOM, timeouts).
 
 ---
 
 ## Build Performance
 
-Design for **reasonable startup and iteration speed**:
+Design for **fast startup and iteration**:
+- Multi-stage builds — lean images.
+- Pre-install common tools to leverage layer caching.
+- Avoid unnecessary per-run work.
 
-- Use multi-stage builds to keep images lean.
-- Pre-install common tools (e.g., Node runtime) to leverage Docker layer caching.
-- Avoid unnecessary work on each run.
-
-Document:
-
-- Approximate observed time for a Nerv job run.
-- How you would improve further at scale (e.g., warm worker pools, shared caches, microVM-based sandboxes).
+Document: observed Nerv job run time, how to improve at scale (warm worker pools, shared caches, microVM sandboxes).
 
 ---
 
 ## Deliverables
 
-Implement:
-
 1. **Docker configuration**
    - `Dockerfile` for supervisor.
-   - Dockerfile(s) and/or `docker-compose` for the Nerv worker + Redis.
-   - Helper scripts, for example:
-     - `run_job.sh` – entrypoint to run a job spec.
-     - `run_nerv_example.sh` – an example script that simulates an AI harness
-       by reading `package.json` and deciding which npm scripts to run
-       (must be labeled as an example).
+   - Dockerfile(s) and/or `docker-compose` for Nerv worker + Redis.
+   - Helper scripts: `run_job.sh` (job spec entrypoint), `run_nerv_example.sh` (example harness simulation — labeled as such).
 
 2. **Documentation (`README.md`)**
-   - Explain architecture: supervisor + pluggable workers, Nerv as the example.
-   - Describe the job spec and lifecycle.
-   - Explain how clean state, security, resource limits, and performance are handled.
-   - Explicitly state that:
-     - The sandbox is **agent-oriented**, not a fixed CI pipeline.
-     - Any included example scripts are **harness simulations**, not the required way to use the sandbox.
+   - Architecture: supervisor + pluggable workers, Nerv as example.
+   - Job spec and lifecycle.
+   - Clean state, security, resource limits, performance.
+   - Explicit: sandbox is **agent-oriented**, example scripts are **harness simulations**.
 
 3. **Proof it works**
-   - Clear instructions to:
-     - Build images.
-     - Start the sandbox.
-     - Run a job against the Nerv repo.
-   - Evidence that:
-     - Nerv builds.
-     - Tests pass.
-     - Redis works.
-     - A health check responds.
-   - Optionally, add example logs/result.json under `docs/` or similar.
+   - Build/start/run instructions.
+   - Evidence: Nerv builds, tests pass, Redis works, health check responds.
+   - Optional: example logs/result.json under `docs/`.
 
 ---
 
 ## How to Start
 
-1. Propose a concrete directory structure for this repo.
-2. Sketch the supervisor and Nerv worker Dockerfiles and/or `docker-compose` files.
-3. Implement:
-   - Supervisor logic for job spec → workspace → worker orchestration → result/log capture.
-   - Nerv worker stack with Redis.
-4. Add a simple example script that:
-   - Reads `package.json` from the Nerv repo.
-   - Infers appropriate `npm` scripts for build/test/run.
-   - Executes them inside the sandbox to produce a full example run.
-5. Write or update `README.md` to clearly explain the design and tradeoffs.
+1. Propose concrete directory structure.
+2. Sketch supervisor and Nerv worker Dockerfiles and/or `docker-compose`.
+3. Implement: supervisor logic (spec → workspace → worker orchestration → result capture) + Nerv worker stack with Redis.
+4. Add example script: reads `package.json`, infers npm scripts, executes for full example run.
+5. Write/update `README.md` — design and tradeoffs.
