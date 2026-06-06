@@ -2,32 +2,22 @@
 # =============================================================================
 # run_eshoponweb_example.sh — EXAMPLE AI AGENT HARNESS (not core sandbox behaviour)
 #
-# This script SIMULATES what an AI coding agent would do after receiving
-# SANDBOX_READY from the supervisor. It:
-#   1. Inspects eShopOnWeb.sln and src/Web/Program.cs to understand the
-#      solution layout and startup configuration.
-#   2. Restores NuGet packages with dotnet restore.
-#   3. Builds the full solution with dotnet build.
-#   4. Runs UnitTests and IntegrationTests (both work with in-memory EF Core).
-#      FunctionalTests are skipped — they require Playwright and a live browser.
-#   5. Starts the web application in background (HTTP-only, port 5000).
-#   6. Probes the /api_health_check endpoint from supervisor and from inside
-#      the worker.
-#   7. Sends DONE.
+# MVP harness for eShopOnWeb — built from README.md observations:
+#   1. Restore: dotnet restore eShopOnWeb.sln (explicit sln required — the repo
+#      root has multiple .sln/.dcproj files and dotnet errors without a target).
+#   2. Build:   dotnet build eShopOnWeb.sln (same reason).
+#   3. Unit tests (UnitTests.csproj — no DB required).
+#   4. Start web app in background (in-memory DB via UseOnlyInMemoryDatabase env).
+#   5. Health check: /api_health_check (registered in Program.cs).
 #
-# Key sandbox constraint: SQL Server has no ARM64 image and cannot run on
-# Apple Silicon. The application is started with UseOnlyInMemoryDatabase=true
-# (set in docker-compose.yml) which switches both CatalogContext and
-# AppIdentityDbContext to EF Core in-memory databases.
+# Integration and functional tests are intentionally omitted from this MVP run.
+# Add them once restore/build/healthcheck are green.
 #
-# A real AI harness would use an LLM to make these decisions; this script
-# hard-codes the .NET workflow as a deterministic demonstration.
+# Key sandbox constraint: SQL Server has no ARM64 image. UseOnlyInMemoryDatabase=true
+# is set in docker-compose.yml, switching EF Core to in-memory databases.
 #
 # Usage:
 #   ./scripts/run_eshoponweb_example.sh
-#
-# The script drives run_job.sh internally with a pre-built job spec for
-# eShopOnWeb.
 # =============================================================================
 set -euo pipefail
 
@@ -142,72 +132,46 @@ READY_LINE=$(grep "SANDBOX_READY" "$SUP_LOG" | tail -1)
 WORKER_NAME=$(echo "$READY_LINE" | grep -oP 'worker=\K\S+')
 log "Stack ready. Worker container: $WORKER_NAME"
 
-# ── Agent inspects the workspace ────────────────────────────────────────────
-# A real agent would call an LLM to read these files and decide on commands.
-# Here we inspect known files deterministically.
-log "Inspecting workspace: solution and project structure"
-send "EXEC inspect ls -la"
-wait_for "EXIT_CODE inspect" 15
-
-send "EXEC inspect-sln cat eShopOnWeb.sln"
-wait_for "EXIT_CODE inspect-sln" 15
-
-send "EXEC inspect-web cat src/Web/Web.csproj"
-wait_for "EXIT_CODE inspect-web" 15
-
 # ── Step 1: Restore NuGet packages ──────────────────────────────────────────
-# dotnet restore downloads all NuGet dependencies declared in the solution.
-# The NuGet package cache lives in ~/.nuget/packages inside the container;
-# a persistent cache volume (not wired here) would speed up repeated runs.
-log "Step 1: dotnet restore"
-send "EXEC restore dotnet restore"
+# Must specify eShopOnWeb.sln explicitly — the repo root has multiple solution
+# and project files (Everything.sln, eShopOnWeb.slnx, docker-compose.dcproj)
+# which cause MSB1011 when no target is given.
+log "Step 1: dotnet restore eShopOnWeb.sln"
+send "EXEC restore dotnet restore eShopOnWeb.sln"
 wait_for "EXIT_CODE restore" 300
 
 # ── Step 2: Build the full solution ─────────────────────────────────────────
-# --no-restore skips redundant package restore; --configuration Debug is the
-# default and matches what dotnet run --no-build expects.
-log "Step 2: dotnet build"
-send "EXEC build dotnet build --no-restore --configuration Debug"
+log "Step 2: dotnet build eShopOnWeb.sln"
+send "EXEC build dotnet build eShopOnWeb.sln --no-restore --configuration Debug"
 wait_for "EXIT_CODE build" 300
 
 # ── Step 3: Unit tests ───────────────────────────────────────────────────────
+# Specify the .csproj directly to avoid multi-project ambiguity.
 # Pure business-logic tests; no database or network required.
-log "Step 3: dotnet test tests/UnitTests"
-send "EXEC test dotnet test tests/UnitTests --no-build --logger trx --verbosity normal"
+log "Step 3: dotnet test UnitTests"
+send "EXEC test dotnet test tests/UnitTests/UnitTests.csproj --no-build --logger trx --verbosity normal"
 wait_for "EXIT_CODE test" 120
 
-# ── Step 4: Integration tests ────────────────────────────────────────────────
-# Use EF Core in-memory databases (IntegrationTests.csproj references
-# Microsoft.EntityFrameworkCore.InMemory). The UseOnlyInMemoryDatabase env var
-# is already set in the worker container via docker-compose.yml.
-log "Step 4: dotnet test tests/IntegrationTests"
-send "EXEC test-integration dotnet test tests/IntegrationTests --no-build --logger trx --verbosity normal"
-wait_for "EXIT_CODE test-integration" 180
-
-# ── Step 5: Start web application in background ──────────────────────────────
-# ASPNETCORE_URLS=http://0.0.0.0:5000 is set in the worker environment
-# (docker-compose.yml), so the app binds on all interfaces without HTTPS.
-# --no-launch-profile prevents dotnet run from reading launchSettings.json
-# (which would override the URL and enable HTTPS profiles).
-# The trailing & exits the shell so the EXEC returns while the server runs.
-log "Step 5: start web application on port $HEALTH_PORT"
-send "EXEC start-server sh -c 'dotnet run --project src/Web --no-build --no-launch-profile &'"
+# ── Step 4: Start web application + PublicApi in background ─────────────────
+# ApiHealthCheck (tagged "apiHealthCheck", mapped to /api_health_check) calls
+# PublicApi at http://localhost:5099/api/catalog-items (baseUrls__apiBase override in compose).
+# ASPNETCORE_ENVIRONMENT=Development keeps Seq health checks disabled (appsettings.Development.json).
+# PublicApi URL overridden to HTTP via ASPNETCORE_URLS; api.log goes to /tmp (writable by sandboxuser).
+log "Step 4: start PublicApi on :5099 and Web on port $HEALTH_PORT"
+send "EXEC start-server sh -c 'ASPNETCORE_URLS=http://0.0.0.0:5099 dotnet run --project src/PublicApi --no-build --no-launch-profile > /tmp/api.log 2>&1 & ASPNETCORE_URLS=http://0.0.0.0:5000 dotnet run --project src/Web --no-build --no-launch-profile &'"
 wait_for "EXIT_CODE start-server" 15
 
-# Give the server time to apply EF Core migrations (in-memory) and seed data.
-log "Waiting 30s for web application to become ready..."
-sleep 30
+# Both services need time to initialise EF Core in-memory databases and seed data.
+log "Waiting 45s for both services to become ready..."
+sleep 45
 
-# ── Step 6: Probe health from supervisor (across Docker network) ─────────────
-# eShopOnWeb maps health check endpoints in Program.cs:
-#   app.MapHealthChecks("api_health_check", ...)
-#   app.MapHealthChecks("home_page_health_check", ...)
-log "Step 6: healthcheck from supervisor → http://${WORKER_NAME}:${HEALTH_PORT}${HEALTH_PATH}"
+# ── Step 5: Health check ─────────────────────────────────────────────────────
+# /api_health_check is registered in Program.cs via MapHealthChecks.
+log "Step 5: healthcheck → http://${WORKER_NAME}:${HEALTH_PORT}${HEALTH_PATH}"
 send "HEALTHCHECK http://${WORKER_NAME}:${HEALTH_PORT}${HEALTH_PATH}"
 wait_for "HEALTHCHECK_STATUS" 30
 
-# ── Step 7: Verify health from inside the worker ─────────────────────────────
-log "Step 7: verify health from inside worker"
+log "Step 5b: verify health from inside worker"
 send "EXEC health-probe curl -sf http://localhost:${HEALTH_PORT}${HEALTH_PATH}"
 wait_for "EXIT_CODE health-probe" 15
 
@@ -240,4 +204,4 @@ docker run --rm -v "${RESULTS_VOLUME}:/r" alpine sh -c \
 
 echo ""
 log "Full run artifacts saved to: $HOST_RESULTS"
-log "  result.json, supervisor.log, logs/{restore,build,test,test-integration,start-server,health-probe}.log"
+log "  result.json, supervisor.log, logs/{restore,build,test,start-server,api,health-probe}.log"

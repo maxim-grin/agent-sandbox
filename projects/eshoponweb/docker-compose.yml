@@ -32,7 +32,12 @@ services:
       # is configured; HttpsRedirectionMiddleware skips redirection when no
       # HTTPS port is resolvable.
       ASPNETCORE_URLS: "http://0.0.0.0:5000"
+      # Development env loads appsettings.Development.json which sets:
+      #   Aspire.Seq.DisableHealthChecks=true (prevents Seq crash when no server)
+      #   Aspire.Seq.ServerUrl=http://localhost:5341 (satisfies AddSeqEndpoint validation)
+      # Override apiBase to HTTP so ApiHealthCheck can reach PublicApi without a dev cert.
       ASPNETCORE_ENVIRONMENT: "Development"
+      baseUrls__apiBase: "http://localhost:5099/api/"
     mem_limit: 2g
     cpus: 2.0
     security_opt:
