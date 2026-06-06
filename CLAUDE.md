@@ -1,4 +1,4 @@
-# AI Agent Sandbox for Nerv
+# AI Agent Sandbox
 
 ## General Notes
 
@@ -130,16 +130,7 @@ Supervisor replies `EXIT_CODE <label> <code>` after each `EXEC`. Branch on non-z
 
 Design and implement a **Docker-based AI agent sandbox**.
 
-Sandbox is **execution env for AI coding agents**, not CI. Generic enough for multiple stacks, validated against one real project:
-
-- Project: **Nerv**
-- Repo: `https://github.com/maxim-grin/nerv`
-- Stack: **TypeScript / Node.js / Redis**
-- "Works" means:
-  - Server builds and starts
-  - Redis available and working
-  - API responds to health check
-  - Test suite passes
+Sandbox is **execution env for AI coding agents**, not CI. Generic enough for multiple stacks.
 
 Design priorities:
 
@@ -160,19 +151,18 @@ Already decided — must be respected.
 
 - AI harness sees **one sandbox type**, configurable per job.
 - Internally: **generic supervisor** (stack-agnostic) + **pluggable worker/stack containers**.
-- Supervisor knows **how to run a job**, not **how to build Nerv**.
+- Supervisor knows **how to run a job**, not **how to build a specific project**.
 
 ### 2. Separate data services per stack
 
-- Nerv stack has own **Redis** container.
-- Future stacks get **own DB/service containers**.
+- Each stack has own **data service containers** (e.g., Redis, Postgres).
 - No shared databases between projects or runs.
 
 ### 3. Clean state per run (must-have)
 
 Each run starts from **clean workspace** and **clean data**:
 - No leftover source code.
-- No leftover Redis data.
+- No leftover data service state.
 - Easy to spin up fresh, tear down deterministically.
 
 ### 4. Non-interactive execution (must-have)
@@ -199,8 +189,8 @@ Critical separation.
 ### Sandbox responsibilities
 
 - **Isolated, reproducible env**: supervisor + stack worker containers, dedicated Docker network + volumes per run.
-- Tools/services for Nerv: Node.js/TypeScript toolchain, Redis.
-- **Lifecycle + clean state**: fresh workspace, fresh Redis per run.
+- Tools/services for target stack (language toolchain, data services).
+- **Lifecycle + clean state**: fresh workspace, fresh data per run.
 - Enforce: non-interactive, security/isolation, resource limits.
 - Capture: logs, structured `result.json`.
 
@@ -213,8 +203,8 @@ Critical separation.
 - Interpret logs/result JSON and decide next steps.
 
 > Important:  
-> **Sandbox must not hard-code project-specific build/test/run commands (e.g., `npm run build`, `npm test`, `npm start`).**  
-> Sandbox exposes env + arbitrary command execution; agent chooses commands based on `package.json`, Dockerfile, project conventions.
+> **Sandbox must not hard-code project-specific build/test/run commands.**  
+> Sandbox exposes env + arbitrary command execution; agent chooses commands based on manifest files, Dockerfile, project conventions.
 
 ---
 
@@ -226,8 +216,8 @@ Example:
 
 ```json
 {
-  "project_type": "node_redis",
-  "repo_url": "https://github.com/maxim-grin/nerv",
+  "project_type": "<type>",
+  "repo_url": "https://github.com/<org>/<repo>",
   "commit": "main"
 }
 ```
@@ -240,25 +230,25 @@ No `build_command`/`test_command`/`run_command` fields. Spec only tells sandbox:
 2. Ensure **clean workspace** (e.g., `/sandbox/workspace`).
 3. Clone repo at specified commit.
 4. Select worker stack from `project_type`.
-5. Orchestrate worker/Redis containers.
+5. Orchestrate worker + data service containers.
 6. Provide arbitrary command execution in worker.
 7. Capture logs, produce structured result.
 8. Exit with clear success/failure code.
 
-Include **simple driver script** (e.g., `run_nerv_example.sh`) imitating agent behavior — reads `package.json`, runs build/test/start in sequence. Must be labeled **example harness**, not core sandbox behavior.
+Include **simple driver script** (e.g., `run_<type>_example.sh`) imitating agent behavior — reads manifest, runs build/test/start in sequence. Must be labeled **example harness**, not core sandbox behavior.
 
 ---
 
-## Workers: Nerv Stack
+## Workers
 
-Nerv stack worker provides: Node.js/TypeScript toolchain, Redis reachable at known host/port, arbitrary command execution.
+Each stack worker provides: language toolchain, data services reachable at known host/port, arbitrary command execution.
 
 Acceptable patterns:
-- `docker-compose.nerv.yml` with `nerv-worker` + `redis` services.
-- Or: dedicated worker image via `docker run` + separate Redis on same network.
+- `docker-compose.<type>.yml` with worker + data service containers.
+- Or: dedicated worker image via `docker run` + separate data services on same network.
 
 Capabilities:
-- `npm install`, `npm run build`, `npm test`, `npm start`
+- Run stack-appropriate build/test/start commands.
 - Respond to health check.
 - Non-interactive.
 
@@ -291,7 +281,7 @@ Every run must produce `result.json` + logs. Supervisor exit code reflects overa
 
 ## Clean State
 
-Each run from known-clean state — no leftover workspace, no leftover Redis data.
+Each run from known-clean state — no leftover workspace, no leftover data service state.
 
 Options: throwaway containers/volumes per run, or explicit reset logic. Document in `README.md`: how to start new run, how state leakage is prevented.
 
@@ -316,7 +306,7 @@ If supervisor orchestrates containers:
 ## Resource Management
 
 Implement and document:
-- Per-container CPU/memory limits for supervisor, Nerv worker, Redis.
+- Per-container CPU/memory limits for supervisor, worker, data services.
 - Ephemeral volumes where possible. Avoid unbounded logs.
 
 Document: what happens when builds/tests hit limits, how harness interprets resource failures (OOM, timeouts).
@@ -330,7 +320,7 @@ Design for **fast startup and iteration**:
 - Pre-install common tools to leverage layer caching.
 - Avoid unnecessary per-run work.
 
-Document: observed Nerv job run time, how to improve at scale (warm worker pools, shared caches, microVM sandboxes).
+Document: observed job run time, how to improve at scale (warm worker pools, shared caches, microVM sandboxes).
 
 ---
 
@@ -338,18 +328,18 @@ Document: observed Nerv job run time, how to improve at scale (warm worker pools
 
 1. **Docker configuration**
    - `Dockerfile` for supervisor.
-   - Dockerfile(s) and/or `docker-compose` for Nerv worker + Redis.
-   - Helper scripts: `run_job.sh` (job spec entrypoint), `run_nerv_example.sh` (example harness simulation — labeled as such).
+   - Dockerfile(s) and/or `docker-compose` for each stack worker + data services.
+   - Helper scripts: `run_job.sh` (job spec entrypoint), `run_<type>_example.sh` (example harness simulation — labeled as such).
 
 2. **Documentation (`README.md`)**
-   - Architecture: supervisor + pluggable workers, Nerv as example.
+   - Architecture: supervisor + pluggable workers, example stack.
    - Job spec and lifecycle.
    - Clean state, security, resource limits, performance.
    - Explicit: sandbox is **agent-oriented**, example scripts are **harness simulations**.
 
 3. **Proof it works**
    - Build/start/run instructions.
-   - Evidence: Nerv builds, tests pass, Redis works, health check responds.
+   - Evidence: project builds, tests pass, data services work, health check responds.
    - Optional: example logs/result.json under `docs/`.
 
 ---
@@ -357,7 +347,7 @@ Document: observed Nerv job run time, how to improve at scale (warm worker pools
 ## How to Start
 
 1. Propose concrete directory structure.
-2. Sketch supervisor and Nerv worker Dockerfiles and/or `docker-compose`.
-3. Implement: supervisor logic (spec → workspace → worker orchestration → result capture) + Nerv worker stack with Redis.
-4. Add example script: reads `package.json`, infers npm scripts, executes for full example run.
+2. Sketch supervisor and stack worker Dockerfiles and/or `docker-compose`.
+3. Implement: supervisor logic (spec → workspace → worker orchestration → result capture) + stack worker with data services.
+4. Add example script: reads manifest, infers build/test/start commands, executes for full example run.
 5. Write/update `README.md` — design and tradeoffs.
