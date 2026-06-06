@@ -176,10 +176,10 @@ docker exec -i --user sandboxuser -w /workspace "$WORKER_NAME" \
   "binaryStorage": "file:./binary/",
   "storageBaseUrl": "http://localhost:8103/storage/",
   "supportEmail": "\"Medplum\" <support@medplum.com>",
-  "googleClientId": "",
-  "googleClientSecret": "",
-  "recaptchaSiteKey": "",
-  "recaptchaSecretKey": "",
+  "googleClientId": "sandbox-google-client-id",
+  "googleClientSecret": "sandbox-google-client-secret",
+  "recaptchaSiteKey": "sandbox-recaptcha-site-key",
+  "recaptchaSecretKey": "sandbox-recaptcha-secret-key",
   "botLambdaRoleArn": "",
   "botLambdaLayerName": "medplum-bot-layer",
   "vmContextBotsEnabled": true,
@@ -211,34 +211,6 @@ docker exec --user sandboxuser -w /workspace "$WORKER_NAME" \
   sh -c 'node -e "JSON.parse(require(\"fs\").readFileSync(\"packages/server/medplum.config.json\",\"utf8\")); process.stdout.write(\"config OK\n\")"' \
   || { log "ERROR: medplum.config.json missing or invalid JSON"; exit 1; }
 
-# Write a test-database config used by the pre-test migration step below.
-# Medplum's loadTestConfig() hardcodes dbname='medplum_test'; migrations must
-# be run on that database before Jest is started (because loadTestConfig sets
-# runMigrations=false, expecting the schema to already be in place).
-log "Writing packages/server/medplum.test.config.json for test-database migrations"
-docker exec -i --user sandboxuser -w /workspace "$WORKER_NAME" \
-  sh -c 'cat > packages/server/medplum.test.config.json' << 'TESTCFG'
-{
-  "port": 8103,
-  "baseUrl": "http://localhost:8103/",
-  "appBaseUrl": "http://localhost:3000/",
-  "binaryStorage": "file:/tmp/medplum-test-binary/",
-  "storageBaseUrl": "http://localhost:8103/storage/",
-  "supportEmail": "\"Medplum\" <support@medplum.com>",
-  "database": {
-    "host": "postgres",
-    "port": 5432,
-    "dbname": "medplum_test",
-    "username": "medplum",
-    "password": "medplum",
-    "runMigrations": true
-  },
-  "redis": {
-    "host": "redis",
-    "port": 6379
-  }
-}
-TESTCFG
 
 # ── Agent inspects the workspace ────────────────────────────────────────────
 # (A real agent would call an LLM; we inspect known files deterministically.)
@@ -287,14 +259,29 @@ const { runFromCli } = await import("./index.js");
 runFromCli(process.argv).catch(console.error);
 SHIM
 
-# ── Step 2.5: Migrate the test database ────────────────────────────────────
-# Medplum's loadTestConfig() sets runMigrations=false, expecting the test
-# database schema to already exist when Jest starts. We run the migration here
-# using the test config (medplum_test database) so the schema is ready.
-# The migrate-main.ts script accepts the config identifier as argv[2].
-log "Step 2.5: migrate medplum_test database"
-send "EXEC migrate-test env NODE_OPTIONS=--max-old-space-size=1800 node_modules/.bin/tsx packages/server/src/migrations/migrate-main.ts file:packages/server/medplum.test.config.json"
-wait_for "EXIT_CODE migrate-test" 300
+# ── Step 2.5: Seed medplum_test (applies schema + initial data) ─────────────
+# `npm run migrate` (tsx migrate-main.ts) is a DEVELOPER tool that generates
+# new migration TypeScript files — it does NOT apply schema to a database.
+#
+# The correct mechanism: `npm run test:seed` runs seed.test.ts which:
+#   1. Overrides runMigrations=true in the test config (loadTestConfig() sets false)
+#   2. Calls initAppServices() to create the full medplum schema in medplum_test
+#   3. Seeds initial user/project data required by auth/admin tests
+#
+# POSTGRES_HOST=postgres is already set in the worker container environment so
+# loadTestConfig() will connect to the postgres service, not localhost.
+log "Step 2.5: seed medplum_test database (schema + initial data via test:seed)"
+send "EXEC migrate-test NODE_OPTIONS=--max-old-space-size=900 npm --prefix packages/server run test:seed"
+wait_for "EXIT_CODE migrate-test" 600
+
+# Grant SELECT on all tables to readonly user after schema is created.
+# ALTER DEFAULT PRIVILEGES (set earlier) covers future tables; this covers any
+# tables that already existed in the schema at seed time.
+log "Granting SELECT on all tables to medplum_test_readonly"
+docker exec "$POSTGRES_CONTAINER" \
+  psql -U medplum -d medplum_test \
+  -c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO medplum_test_readonly;" \
+  2>&1 || log "Grant failed (non-fatal — default privileges cover future tables)"
 
 # ── Step 3: Run the server test suite ────────────────────────────────────────
 # Note: cloud/AWS/Lambda tests fail when AWS credentials are absent — that is
