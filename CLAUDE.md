@@ -5,6 +5,13 @@
 - Do not scan the `.git` directory — it contains no useful information for this project.
 - When using Bash to read logs or large files, pipe through `head`, `tail`, or `grep` to keep output small. Never `cat` large files — use `Read` with `offset`/`limit` instead.
 
+## Pipeline Run Procedure
+
+When running a pipeline end-to-end:
+1. Do a **single run**.
+2. Share a concise report: what passed, what failed, root causes, and concrete fix options.
+3. **Stop** — do not immediately re-run with a fix applied. Ask the user whether to implement the fixes and run again.
+
 ## Adding a New Project Stack
 
 Create three things — no supervisor changes needed.
