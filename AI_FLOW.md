@@ -2,6 +2,22 @@
 
 ---
 
+## General AI Agent Behaviour Observations
+
+### AI skips MVP and tries to make everything work at once
+
+When given a new project, the AI tends to design and implement a full pipeline end-to-end (restore → build → unit tests → integration tests → start server → healthcheck) rather than starting from the smallest working slice and expanding. This makes early failures harder to interpret and wastes iteration time on steps that depend on earlier broken ones.
+
+**Better approach:** Start from MVP (e.g. restore + build only), confirm it's green, then layer on tests and server health incrementally.
+
+### AI works around blockers silently instead of surfacing them
+
+When the AI hits an external dependency it can't reach (e.g. a CDN blocked by the sandbox firewall), its first instinct is to add a workaround (skipping the build step, mocking the call, etc.) rather than flagging the blocked domain clearly and asking the user to unblock it. This hides the real cause and may introduce unnecessary complexity.
+
+**Better approach:** Surface blocked domains or missing external access explicitly ("cdnjs.cloudflare.com is blocked — should I request it be unblocked?") before attempting workarounds.
+
+---
+
 ## eShopOnWeb Stack Addition (2026-06-06)
 
 Findings from researching and implementing the eShopOnWeb worker stack — an ASP.NET Core / C# / EF Core application. No live run yet; this section covers the research and design work.
