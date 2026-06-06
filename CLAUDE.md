@@ -5,6 +5,87 @@
 - Do not scan the `.git` directory — it contains no useful information for this project.
 - When using Bash to read logs or large files, pipe through `head`, `tail`, or `grep` to keep output small. Never `cat` large files — use `Read` with `offset`/`limit` instead.
 
+## Adding a New Project Stack
+
+Create three things — no supervisor changes needed.
+
+### 1. `projects/<type>/worker/Dockerfile`
+
+```dockerfile
+FROM <runtime-image>   # must be multi-arch if Apple Silicon support is needed
+
+RUN <install git curl and any system deps>
+
+RUN groupadd -g 1001 sandboxgroup && useradd -u 1001 -g sandboxgroup -m sandboxuser
+RUN mkdir -p /workspace /sandbox/results/logs \
+    && chown -R sandboxuser:sandboxgroup /workspace /sandbox
+
+WORKDIR /workspace
+USER sandboxuser
+
+HEALTHCHECK --interval=5s --timeout=5s --retries=3 CMD <runtime version check>
+CMD ["sleep", "infinity"]
+```
+
+### 2. `projects/<type>/docker-compose.yml`
+
+```yaml
+services:
+  worker:
+    image: "${WORKER_IMAGE}"
+    container_name: "${RUN_ID}-<type>-worker-1"  # exact pattern — supervisor derives worker name from this
+    networks: [sandbox]
+    volumes:
+      - workspace:/workspace
+      - results:/sandbox/results
+    working_dir: /workspace
+    environment:
+      CI: "true"
+      # stack-specific env vars
+    mem_limit: <Xg>
+    cpus: <N>
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    user: sandboxuser
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "<version check>"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # optional data service containers (postgres, redis, …)
+  # use compose-managed (not external) volumes so `docker compose down -v` cleans them up
+
+networks:
+  sandbox:
+    external: true
+    name: "${SANDBOX_NETWORK}"
+
+volumes:
+  workspace:
+    external: true
+    name: "${WORKSPACE_VOLUME}"
+  results:
+    external: true
+    name: "${RESULTS_VOLUME}"
+```
+
+### 3. Schema + example script
+
+- Add `"<type>"` to the `project_type` enum in `schemas/job_spec.schema.json`.
+- Add `scripts/run_<type>_example.sh` following the pattern of existing example scripts: build images, create Docker resources, start supervisor, send EXEC/HEALTHCHECK/DONE commands, print result summary.
+
+### Key invariants
+
+- **Container name** must be `${RUN_ID}-<type>-worker-1`. The supervisor hardcodes this pattern in `orchestrate.sh` when waiting for the worker healthcheck and in `exec.sh` when routing `EXEC` commands.
+- **Network and volumes are external** — created by the harness before compose runs, destroyed after. Never declare them as `driver: local` in the compose file.
+- **Non-root only** — all agent commands run as `sandboxuser` (UID 1001). Ensure the runtime image supports non-root execution; some base images need extra setup (e.g. `chmod` on global tool dirs).
+- **EXEC word-splitting** — `sandbox_exec` joins everything after the label with `$*` and passes it to `sh -c`. Shell operators (`&`, `&&`, pipes) work. Arguments with internal spaces must use `env VAR=val cmd` form or `sh -c '...'` quoting rather than `export VAR && cmd`.
+
+---
+
 ## Agent Guidance: Using the Sandbox
 
 This sandbox is **not a CI pipeline**. It provides an isolated environment, a cloned workspace, and a way to execute arbitrary commands. The agent is responsible for reading project manifests, deciding which commands to run, and interpreting the results.

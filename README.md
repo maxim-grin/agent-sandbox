@@ -39,9 +39,20 @@ Each subdirectory of `projects/` is a self-contained stack with a `docker-compos
 
 ```
 projects/
-├── nerv/       Node 20 + Redis — see projects/nerv/README.md
-└── medplum/    Node 22 + PostgreSQL + Redis — see projects/medplum/README.md
+├── nerv/         Node 20 + Redis — see projects/nerv/README.md
+├── medplum/      Node 22 + PostgreSQL + Redis — see projects/medplum/README.md
+└── eshoponweb/   .NET SDK 10, in-memory EF Core (no SQL Server) — see projects/eshoponweb/README.md
 ```
+
+---
+
+## Adding a New Stack
+
+Tell Claude:
+
+> Add `<name>` as a new project type. Stack: `<runtime + any data services>`. Repo: `<url>`. "Works" means: builds, tests pass, and `<health endpoint>` returns 200. `<any constraints, e.g. no ARM64 image for X — use in-memory alternative>`.
+
+The required files and naming conventions are documented in `CLAUDE.md`.
 
 ---
 
@@ -83,6 +94,7 @@ See each project's README for stack-specific job specs and quickstart instructio
 
 - [Nerv stack](projects/nerv/README.md)
 - [Medplum stack](projects/medplum/README.md)
+- [eShopOnWeb stack](projects/eshoponweb/README.md)
 
 ### Inspect results
 
@@ -155,7 +167,7 @@ Data services (Redis, PostgreSQL) use compose-managed volumes that are removed b
 ### Network
 
 - Each run uses a dedicated Docker bridge network; containers in one run cannot reach another run's containers
-- Outbound internet access from the worker is unrestricted by default (required for `npm install`). For higher-security deployments, route through a caching proxy (e.g. Verdaccio) or add an egress firewall rule.
+- Outbound internet access from the worker is unrestricted by default (required for package restore — `npm install`, `dotnet restore`, etc.). For higher-security deployments, route through a caching proxy (e.g. Verdaccio, a NuGet feed) or add an egress firewall rule.
 
 ---
 
@@ -179,16 +191,13 @@ Stack-specific limits are documented in each project's README.
 
 ### Layer caching
 
-Worker Dockerfiles use multi-stage builds:
-
-1. **Toolchain stage** — installs the TypeScript toolchain globally. Cached; only rebuilt when the base image or tool list changes.
-2. **Runtime stage** — copies compiled tools from stage 1 into a clean image. Project source never baked in; it arrives at runtime via the workspace volume.
+Worker images are built once and reused across runs. Project source is never baked into the image — it arrives at runtime via the workspace volume. Some stacks use multi-stage builds to separate toolchain installation from the runtime image (e.g. the Nerv worker pre-installs the TypeScript toolchain in a separate stage to keep the final layer lean).
 
 Because `run_job.sh` pre-builds the worker image before the supervisor starts, subsequent runs with the same `project_type` reuse the cached image entirely.
 
 ### Improvement options at scale
 
-- **npm cache volume** — mount a persistent cache volume into the worker to avoid re-downloading packages across runs.
+- **Package cache volume** — mount a persistent cache volume into the worker (e.g. `~/.npm` for Node, `~/.nuget/packages` for .NET) to avoid re-downloading packages across runs.
 - **Warm worker pools** — pre-start idle workers with the repo pre-cloned and dependencies pre-installed; jobs skip straight to build/test.
 - **MicroVM isolation** — replace Docker containers with Firecracker microVMs (e.g. via Kata Containers) for stronger isolation with comparable startup times (~125ms per VM).
 - **Registry mirror** — route `npm install` through a local Verdaccio instance to eliminate external network latency.

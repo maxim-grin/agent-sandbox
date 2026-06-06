@@ -1,4 +1,79 @@
-# AI Agent Flow Log — Medplum Sandbox Validation
+# AI Agent Flow Log
+
+---
+
+## eShopOnWeb Stack Addition (2026-06-06)
+
+Findings from researching and implementing the eShopOnWeb worker stack — an ASP.NET Core / C# / EF Core application. No live run yet; this section covers the research and design work.
+
+### SDK Version — .NET 10 Required
+
+The repo's `global.json` specifies:
+
+```json
+{ "sdk": { "version": "10.0.0", "rollForward": "latestFeature" } }
+```
+
+The worker image must use `mcr.microsoft.com/dotnet/sdk:10.0`, not an older LTS version. The `rollForward: latestFeature` setting means any 10.x feature band works, so the floating `10.0` tag is correct. Microsoft publishes multi-arch (arm64 + amd64) images for .NET SDK 10, so it runs on Apple Silicon without emulation.
+
+### No SQL Server on ARM64 — In-Memory Database
+
+SQL Server has no ARM64 Docker image. The user confirmed this constraint up front. eShopOnWeb supports an in-memory mode through a config flag checked in `src/Infrastructure/Dependencies.cs`:
+
+```csharp
+if (bool.Parse(configuration["UseOnlyInMemoryDatabase"]!))
+{
+    services.AddDbContext<CatalogContext>(c => c.UseInMemoryDatabase("Catalog"));
+    services.AddDbContext<AppIdentityDbContext>(c => c.UseInMemoryDatabase("Identity"));
+}
+```
+
+The env var name is `UseOnlyInMemoryDatabase` — not `UseInMemoryDatabase`. This was confirmed by fetching and reading `Dependencies.cs` directly from the repo. The stack has no database service container; just the single .NET worker.
+
+### HTTPS Redirection — No-Op Without an HTTPS Port
+
+`Program.cs` calls `app.UseHttpsRedirection()` unconditionally. However, ASP.NET Core's `HttpsRedirectionMiddleware` resolves the target port by checking (in order): `options.HttpsPort`, the `ASPNETCORE_HTTPS_PORT` env var, and then the server's bound addresses. Setting `ASPNETCORE_URLS=http://0.0.0.0:5000` (HTTP-only) leaves no HTTPS port resolvable, so the middleware is effectively a no-op and HTTP requests are served directly.
+
+This avoids needing a self-signed certificate or a separate HTTPS binding inside the container.
+
+### Health Check Routes
+
+`Program.cs` registers two health check endpoints using tag-based predicates:
+
+```csharp
+app.MapHealthChecks("home_page_health_check", new HealthCheckOptions { Predicate = check => check.Tags.Contains("homePageHealthCheck") });
+app.MapHealthChecks("api_health_check", new HealthCheckOptions { Predicate = check => check.Tags.Contains("apiHealthCheck") });
+```
+
+There is no `/health` or `/healthz` route. The harness probes `http://<worker>:5000/api_health_check`.
+
+### Seed Data With In-Memory Database
+
+`CatalogContextSeed.SeedAsync()` begins with:
+
+```csharp
+if (catalogContext.Database.IsSqlServer())
+```
+
+This returns `false` for in-memory databases, so the CSV-backed catalog seed is skipped. `Program.cs` calls `await app.SeedDatabaseAsync()` on startup, which still runs — it seeds identity/admin user data, which works with in-memory EF Core. For validation purposes (build, tests, health check) this is sufficient.
+
+### Integration Tests Are Already In-Memory Capable
+
+`tests/IntegrationTests/IntegrationTests.csproj` already references `Microsoft.EntityFrameworkCore.InMemory`. No additional configuration is needed for the integration test suite to run in the sandbox.
+
+`tests/FunctionalTests` — excluded from the harness. Functional tests depend on Playwright or a live browser context and are not suitable for headless container execution.
+
+### `--no-launch-profile` Matters for `dotnet run`
+
+Without `--no-launch-profile`, `dotnet run` reads `src/Web/Properties/launchSettings.json` and uses whichever profile it selects by default. Those profiles typically bind to HTTPS (`https://localhost:5001`) or set their own URL, overriding `ASPNETCORE_URLS`. Passing `--no-launch-profile` ensures the container environment variables are respected.
+
+### `AddAspireServiceDefaults()` Is Lightweight
+
+`Program.cs` calls `builder.AddAspireServiceDefaults()`. This is a .NET Aspire helper that registers OpenTelemetry exporters and health checks. It does **not** require the Aspire orchestrator or a running Seq/OTLP collector. Telemetry export calls fail silently if no collector is available. The application starts and serves traffic normally.
+
+---
+
+## Medplum Sandbox Validation
 
 This document records what the AI agent discovered autonomously during the Medplum sandbox validation run, where the user had to intervene, and what operational lessons were acknowledged afterward.
 
