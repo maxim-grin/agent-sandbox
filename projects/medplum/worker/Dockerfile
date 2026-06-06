@@ -7,7 +7,7 @@
 
 FROM node:22-alpine
 
-RUN apk add --no-cache git curl
+RUN apk add --no-cache git curl openssl
 
 # Non-root user for all agent-driven commands (fixed UID/GID so the supervisor
 # can chown the cloned workspace without needing sandboxuser to exist there).

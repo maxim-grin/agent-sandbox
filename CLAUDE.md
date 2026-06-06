@@ -1,5 +1,10 @@
 # AI Agent Sandbox for Nerv
 
+## General Notes
+
+- Do not scan the `.git` directory — it contains no useful information for this project.
+- When using Bash to read logs or large files, pipe through `head`, `tail`, or `grep` to keep output small. Never `cat` large files — use `Read` with `offset`/`limit` instead.
+
 You are helping design and implement a **Docker-based AI agent sandbox**.
 
 This sandbox is an **execution environment for AI coding agents**, not a traditional CI pipeline. It must be generic enough to support multiple technology stacks in the future, but in this exercise it will be **validated against a single real project**:
