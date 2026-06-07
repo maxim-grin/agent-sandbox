@@ -48,10 +48,11 @@ RESULTS_VOLUME="${RUN_ID}-results"
 WORKSPACE_VOLUME="${RUN_ID}-workspace"
 SUPERVISOR_IMAGE="ai-sandbox-supervisor"
 WORKER_IMAGE="ai-sandbox-medplum-worker"
+PROJECT_TYPE="medplum"
 
 CMD_PIPE="/tmp/${RUN_ID}-cmds"
 SUP_LOG="/tmp/${RUN_ID}-sup.log"
-HOST_RESULTS="$REPO_ROOT/run_results/$RUN_ID"
+HOST_RESULTS="$REPO_ROOT/run_results/$PROJECT_TYPE/$RUN_ID"
 
 HEALTH_PORT=8103
 HEALTH_PATH="/healthcheck"

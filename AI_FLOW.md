@@ -245,3 +245,20 @@ All three are configurable via `.env` at the repo root or shell environment, so 
 Example scripts that simulate an AI agent session (`run_<type>_example.sh`) were co-located with `run_job.sh` in `scripts/`. Mixing them creates ambiguity: a real agent scanning `scripts/` might treat the example scripts as part of the sandbox interface.
 
 Moved to `examples/`. The `scripts/` directory now contains only `run_job.sh` — the one script an agent or harness actually needs to invoke. The examples are human-readable demonstrations; they belong outside the operational surface.
+
+### Agent should not see previous run history
+
+`run_results/` is on the host filesystem and is not mounted into the worker container. This is intentional — agents get no access to prior run results.
+
+Arguments for giving agents history were considered and rejected:
+
+- **Stale failures mislead.** A failure from a previous commit may be fixed in the current one. The agent would waste time avoiding a non-issue.
+- **Stale successes give false confidence.** A passing run on commit A says nothing about commit B.
+- **Design intent.** The agent reads the repo's own manifests to decide commands. Prior run logs bypass that intent and add noise before the first tool call.
+- **Context cost.** Even summary-level logs across 30+ runs consume significant context before any useful work starts.
+
+**Exception worth considering:** a small structured `project_notes.json` passed at job start — recording *persistent* patterns that don't change between commits (e.g. "NuGet restore requires private feed auth", "test suite requires `openssl` in PATH"). This is signal, not history. It has not been implemented yet.
+
+### `run_results/` organised by project type
+
+Previously all run directories were flat under `run_results/<run-id>/`. Reorganised to `run_results/<project_type>/<run-id>/` so runs for different stacks don't mix. The change is in `scripts/run_job.sh` and all three example scripts (each got a `PROJECT_TYPE` variable that feeds the path).

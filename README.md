@@ -246,13 +246,24 @@ Stack-specific timings are documented in each project's README.
 Every run produces:
 
 ```
-/sandbox/results/
+/sandbox/results/          # in-container path (results volume)
 ├── result.json
 └── logs/
     ├── install.log
     ├── build.log
     ├── test.log
     └── run.log        # if the agent starts the service
+```
+
+Results are copied to the host at the end of each run:
+
+```
+run_results/
+└── <project_type>/
+    └── <run-id>/
+        ├── result.json
+        ├── supervisor.log
+        └── logs/
 ```
 
 `result.json` schema:

@@ -32,7 +32,7 @@ RESULTS_VOLUME="${RUN_ID}-results"
 WORKSPACE_VOLUME="${RUN_ID}-workspace"
 SUPERVISOR_IMAGE="ai-sandbox-supervisor"
 WORKER_IMAGE="ai-sandbox-${PROJECT_TYPE}-worker"
-HOST_RESULTS="$REPO_ROOT/run_results/$RUN_ID"
+HOST_RESULTS="$REPO_ROOT/run_results/$PROJECT_TYPE/$RUN_ID"
 
 cleanup() {
   echo "[run_job] Persisting results → $HOST_RESULTS"

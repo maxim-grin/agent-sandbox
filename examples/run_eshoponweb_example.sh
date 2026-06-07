@@ -42,10 +42,11 @@ RESULTS_VOLUME="${RUN_ID}-results"
 WORKSPACE_VOLUME="${RUN_ID}-workspace"
 SUPERVISOR_IMAGE="ai-sandbox-supervisor"
 WORKER_IMAGE="ai-sandbox-eshoponweb-worker"
+PROJECT_TYPE="eshoponweb"
 
 CMD_PIPE="/tmp/${RUN_ID}-cmds"
 SUP_LOG="/tmp/${RUN_ID}-sup.log"
-HOST_RESULTS="$REPO_ROOT/run_results/$RUN_ID"
+HOST_RESULTS="$REPO_ROOT/run_results/$PROJECT_TYPE/$RUN_ID"
 
 HEALTH_PORT=5000
 HEALTH_PATH="/api_health_check"
