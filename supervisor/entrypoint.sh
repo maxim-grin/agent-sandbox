@@ -10,6 +10,8 @@ START_TIME=$(date +%s)
 BUILD_EXIT_CODE=255
 TEST_EXIT_CODE=255
 HEALTH_STATUS=0
+FINISHED=0
+WATCHDOG_PID=""
 
 # Per-step tracking (populated during the command loop; read by write_result in capture.sh)
 STEP_LABELS=()
@@ -26,6 +28,11 @@ source /supervisor/lib/exec.sh
 log() { echo "[supervisor] $*"; }
 
 finish() {
+  [[ $FINISHED -eq 1 ]] && return
+  FINISHED=1
+
+  [[ -n "$WATCHDOG_PID" ]] && kill "$WATCHDOG_PID" 2>/dev/null || true
+
   local status=$1
   local end_time
   end_time=$(date +%s)
@@ -38,7 +45,7 @@ finish() {
     log "Done in ${duration}s."
     exit 0
   else
-    log "Failed after ${duration}s." >&2
+    log "Failed after ${duration}s (status: $status)." >&2
     exit 1
   fi
 }
@@ -49,6 +56,7 @@ on_error() {
 }
 trap 'on_error $LINENO' ERR
 trap 'log "Received SIGTERM, shutting down..."; finish "failure"' TERM
+trap 'log "Total timeout (${TIMEOUT_TOTAL:-1800}s) exceeded." >&2; finish "timeout"' USR1
 
 # --- Parse job spec ---
 log "Reading job spec: $JOB_SPEC"
@@ -57,6 +65,12 @@ REPO_URL=$(jq -r '.repo_url' "$JOB_SPEC")
 COMMIT=$(jq -r '.commit // "main"' "$JOB_SPEC")
 
 log "project_type=$PROJECT_TYPE repo=$REPO_URL commit=$COMMIT"
+
+# --- Start global timeout watchdog ---
+TIMEOUT_TOTAL="${TIMEOUT_TOTAL:-1800}"
+log "Timeouts: total=${TIMEOUT_TOTAL}s exec=${TIMEOUT_EXEC:-600}s stack_healthy=${TIMEOUT_STACK_HEALTHY:-120}s"
+( sleep "$TIMEOUT_TOTAL" && kill -USR1 $$ 2>/dev/null ) &
+WATCHDOG_PID=$!
 
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
 [[ -f "$COMPOSE_FILE" ]] || { log "No compose file for project_type: $PROJECT_TYPE" >&2; exit 1; }

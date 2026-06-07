@@ -18,17 +18,23 @@ sandbox_exec() {
   echo "[exec] Running '$cmd_str' in $worker (log: $log_file)"
   t0=$(date +%s)
 
-  docker exec \
-    --user sandboxuser \
-    -e CI=true \
-    -e NODE_ENV=test \
-    -w /workspace \
-    "$worker" \
-    sh -c "$cmd_str" 2>&1 | tee "$log_file"
+  local timeout_secs="${TIMEOUT_EXEC:-600}"
+  timeout "$timeout_secs" \
+    docker exec \
+      --user sandboxuser \
+      -e CI=true \
+      -e NODE_ENV=test \
+      -w /workspace \
+      "$worker" \
+      sh -c "$cmd_str" 2>&1 | tee "$log_file"
 
   local exit_code="${PIPESTATUS[0]}"
   t1=$(date +%s)
   LAST_EXEC_DURATION=$(( t1 - t0 ))
-  echo "[exec] '$label' exited: $exit_code (${LAST_EXEC_DURATION}s)"
+  if [[ $exit_code -eq 124 ]]; then
+    echo "[exec] '$label' timed out after ${timeout_secs}s"
+  else
+    echo "[exec] '$label' exited: $exit_code (${LAST_EXEC_DURATION}s)"
+  fi
   return "$exit_code"
 }

@@ -13,6 +13,16 @@ JOB_SPEC="${1:-}"
 [[ -z "$JOB_SPEC" ]] && usage
 [[ ! -f "$JOB_SPEC" ]] && { echo "Error: job spec file not found: $JOB_SPEC" >&2; exit 1; }
 
+# Load .env from repo root if present (allows overriding timeout defaults)
+ENV_FILE="$REPO_ROOT/.env"
+if [[ -f "$ENV_FILE" ]]; then
+  echo "[run_job] Loading env: $ENV_FILE"
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+
 JOB_SPEC="$(realpath "$JOB_SPEC")"
 PROJECT_TYPE="$(jq -r '.project_type' "$JOB_SPEC")"
 
@@ -79,6 +89,9 @@ docker run --rm -i \
   -e RESULTS_VOLUME="$RESULTS_VOLUME" \
   -e WORKSPACE_VOLUME="$WORKSPACE_VOLUME" \
   -e WORKER_IMAGE="$WORKER_IMAGE" \
+  -e TIMEOUT_TOTAL="${TIMEOUT_TOTAL:-1800}" \
+  -e TIMEOUT_EXEC="${TIMEOUT_EXEC:-600}" \
+  -e TIMEOUT_STACK_HEALTHY="${TIMEOUT_STACK_HEALTHY:-120}" \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v "$JOB_SPEC":/job/spec.json:ro \
   -v "$RESULTS_VOLUME":/sandbox/results \

@@ -230,6 +230,16 @@ Early versions mounted the entire `projects/` directory into the supervisor. Eac
 
 No supervisor code changes were required beyond updating the path constant (`PROJECTS` → `PROJECT_DIR`).
 
+### Timeouts needed at every layer
+
+Without explicit timeouts, a hung `npm install` or a test that deadlocks leaves the supervisor (and the whole run) blocked indefinitely. Three distinct limits cover the full lifecycle:
+
+- **Per-step (`TIMEOUT_EXEC`, default 600s)** — wraps each `EXEC`'s `docker exec` call with `timeout(1)`. Exit code 124 is returned to the agent as the step's `EXIT_CODE`, so the harness can detect and abort rather than loop. Steps with code 124 appear in `result.json` with `"status": "failure"`.
+- **Total job (`TIMEOUT_TOTAL`, default 1800s)** — a background watchdog fires SIGUSR1 to the supervisor after the whole-job limit. The supervisor calls `finish("timeout")` — same teardown path as normal failure, so `result.json` and logs are always written.
+- **Stack startup (`TIMEOUT_STACK_HEALTHY`, default 120s)** — caps the wait for the worker container's Docker healthcheck; prevents the job from hanging if the image fails to start.
+
+All three are configurable via `.env` at the repo root or shell environment, so individual stacks with slow builds (e.g. first-time .NET restore) can raise limits without touching supervisor code.
+
 ### Separate harness simulations from operational scripts
 
 Example scripts that simulate an AI agent session (`run_<type>_example.sh`) were co-located with `run_job.sh` in `scripts/`. Mixing them creates ambiguity: a real agent scanning `scripts/` might treat the example scripts as part of the sandbox interface.

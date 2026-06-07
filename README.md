@@ -195,6 +195,33 @@ Stack-specific limits are documented in each project's README.
 
 ---
 
+## Timeouts
+
+Three timeout thresholds prevent jobs from running indefinitely.
+
+| Variable | Default | What it controls |
+|----------|---------|-----------------|
+| `TIMEOUT_TOTAL` | `1800` | Whole-job wall-clock limit (seconds). When exceeded, the supervisor sends itself SIGUSR1, calls `finish("timeout")`, and tears down the stack. |
+| `TIMEOUT_EXEC` | `600` | Per-`EXEC`-step limit (seconds). Wraps `docker exec` with `timeout(1)`. A timed-out step exits with code `124`; the command loop continues so the agent can decide what to do. |
+| `TIMEOUT_STACK_HEALTHY` | `120` | How long to wait for the worker container to pass its Docker healthcheck before giving up. |
+
+All three appear in `result.json` implicitly: a timed-out job has `"status": "timeout"` and step entries with `"exit_code": 124`.
+
+### Configuring timeouts
+
+Set the variables in a `.env` file in the repo root before running `run_job.sh`:
+
+```bash
+# .env
+TIMEOUT_TOTAL=3600       # allow up to 1 hour for slow builds
+TIMEOUT_EXEC=900         # allow 15 minutes per step
+TIMEOUT_STACK_HEALTHY=60 # fail fast if the worker doesn't start
+```
+
+`run_job.sh` sources `.env` automatically if the file exists. Variables can also be exported in the calling shell — shell env takes precedence over `.env`.
+
+---
+
 ## Build Performance
 
 ### Layer caching

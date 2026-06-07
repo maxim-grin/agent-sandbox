@@ -19,7 +19,7 @@ start_stack() {
     --remove-orphans
 
   echo "[orchestrate] Stack up. Waiting for worker healthcheck..."
-  _wait_healthy "${RUN_ID}-${project_type}-worker-1" 60
+  _wait_healthy "${RUN_ID}-${project_type}-worker-1" "${TIMEOUT_STACK_HEALTHY:-120}"
 }
 
 teardown_stack() {
