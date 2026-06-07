@@ -54,7 +54,7 @@ HEALTHCHECK_STATUS 200
 DONE
 ```
 
-`scripts/run_eshoponweb_example.sh` is a harness simulation that does exactly this. It is not required behaviour — a real AI agent would read the source files and infer these commands via LLM.
+`examples/run_eshoponweb_example.sh` is a harness simulation that does exactly this. It is not required behaviour — a real AI agent would read the source files and infer these commands via LLM.
 
 ## In-memory database
 

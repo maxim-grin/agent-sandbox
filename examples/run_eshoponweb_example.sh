@@ -17,7 +17,7 @@
 # is set in docker-compose.yml, switching EF Core to in-memory databases.
 #
 # Usage:
-#   ./scripts/run_eshoponweb_example.sh
+#   ./examples/run_eshoponweb_example.sh
 # =============================================================================
 set -euo pipefail
 

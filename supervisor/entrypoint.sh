@@ -3,7 +3,7 @@ set -euo pipefail
 
 WORKSPACE="/sandbox/workspace"
 RESULTS="/sandbox/results"
-PROJECTS="/sandbox/projects"
+PROJECT_DIR="/sandbox/project"
 JOB_SPEC="/job/spec.json"
 
 START_TIME=$(date +%s)
@@ -58,7 +58,7 @@ COMMIT=$(jq -r '.commit // "main"' "$JOB_SPEC")
 
 log "project_type=$PROJECT_TYPE repo=$REPO_URL commit=$COMMIT"
 
-COMPOSE_FILE="$PROJECTS/$PROJECT_TYPE/docker-compose.yml"
+COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
 [[ -f "$COMPOSE_FILE" ]] || { log "No compose file for project_type: $PROJECT_TYPE" >&2; exit 1; }
 
 # --- Clean workspace ---
@@ -68,6 +68,13 @@ mkdir -p "$RESULTS/logs"
 
 # --- Clone repo ---
 clone_repo "$REPO_URL" "$COMMIT" "$WORKSPACE"
+
+# --- Copy project agent guide into workspace so agent finds it ---
+if [[ -f "$PROJECT_DIR/CLAUDE.md" ]]; then
+  cp "$PROJECT_DIR/CLAUDE.md" "$WORKSPACE/AGENT_GUIDE.md"
+  chown 1001:1001 "$WORKSPACE/AGENT_GUIDE.md"
+  log "Copied CLAUDE.md → /workspace/AGENT_GUIDE.md"
+fi
 
 # --- Start worker stack ---
 start_stack "$COMPOSE_FILE" "$PROJECT_TYPE"

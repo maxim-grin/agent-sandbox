@@ -202,3 +202,36 @@ After all fixes (both autonomous and user-assisted):
 | Healthcheck | HTTP 200, `postgres: true`, `redis: true` |
 
 The single remaining failure is in the upstream medplum repository and is not fixable within the sandbox.
+
+---
+
+## Sandbox Design Findings (2026-06-07)
+
+### Per-project agent guide (`CLAUDE.md`)
+
+Leaving the agent to infer the full workflow from raw manifests (`package.json`, `*.csproj`, etc.) works, but wastes early tool calls on discovery that is the same every run for a known project. A `CLAUDE.md` placed in each project directory and copied into the workspace as `AGENT_GUIDE.md` before `SANDBOX_READY` fires lets the agent skip re-inference and go straight to execution.
+
+Minimum content that pays off:
+
+- Standard command sequence (install → build → test → start)
+- Health endpoint URL and expected status
+- Which files are worth inspecting
+- Failure code meanings (e.g. exit 137 = OOM)
+
+The file is project-specific but follows a consistent schema across all stacks, so a real agent can treat it as a structured hint rather than free-form docs.
+
+### Single-project mount
+
+Early versions mounted the entire `projects/` directory into the supervisor. Each job only needs one stack's `docker-compose.yml` and `CLAUDE.md`. Mounting `projects/<type>/` as `/sandbox/project` instead:
+
+- Reduces the blast radius if the supervisor is compromised — it cannot read other stacks' configs.
+- Removes the possibility of the agent accidentally referencing a sibling project's files.
+- Makes the isolation boundary explicit in the `docker run` invocation.
+
+No supervisor code changes were required beyond updating the path constant (`PROJECTS` → `PROJECT_DIR`).
+
+### Separate harness simulations from operational scripts
+
+Example scripts that simulate an AI agent session (`run_<type>_example.sh`) were co-located with `run_job.sh` in `scripts/`. Mixing them creates ambiguity: a real agent scanning `scripts/` might treat the example scripts as part of the sandbox interface.
+
+Moved to `examples/`. The `scripts/` directory now contains only `run_job.sh` — the one script an agent or harness actually needs to invoke. The examples are human-readable demonstrations; they belong outside the operational surface.

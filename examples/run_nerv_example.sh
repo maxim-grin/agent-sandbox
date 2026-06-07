@@ -13,7 +13,7 @@
 # hard-codes the npm-based workflow as a deterministic demonstration.
 #
 # Usage:
-#   ./scripts/run_nerv_example.sh
+#   ./examples/run_nerv_example.sh
 #
 # The script drives run_job.sh internally with a pre-built job spec for Nerv.
 # =============================================================================
@@ -86,7 +86,7 @@ docker run --rm -i \
   -v "$JOB_SPEC":/job/spec.json:ro \
   -v "$RESULTS_VOLUME":/sandbox/results \
   -v "$WORKSPACE_VOLUME":/sandbox/workspace \
-  -v "$REPO_ROOT/projects":/sandbox/projects:ro \
+  -v "$REPO_ROOT/projects/nerv":/sandbox/project:ro \
   "$SUPERVISOR_IMAGE" < "$CMD_PIPE" > "$SUP_LOG" 2>&1 &
 
 SUP_PID=$!

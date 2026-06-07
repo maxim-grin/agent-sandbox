@@ -52,7 +52,7 @@ HEALTHCHECK_STATUS 200
 DONE
 ```
 
-`scripts/run_medplum_example.sh` is a harness simulation that does exactly this — it is not required behavior, just a demonstration of what an AI agent would do.
+`examples/run_medplum_example.sh` is a harness simulation that does exactly this — it is not required behavior, just a demonstration of what an AI agent would do.
 
 ## PostgreSQL clean state
 

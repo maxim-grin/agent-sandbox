@@ -21,7 +21,7 @@
 # hard-codes the Medplum-specific workflow as a deterministic demonstration.
 #
 # Usage:
-#   ./scripts/run_medplum_example.sh
+#   ./examples/run_medplum_example.sh
 #
 # The script drives run_job.sh internally with a pre-built job spec for Medplum.
 # =============================================================================

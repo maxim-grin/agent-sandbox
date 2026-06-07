@@ -49,7 +49,7 @@ HEALTHCHECK_STATUS 200
 DONE
 ```
 
-`scripts/run_nerv_example.sh` is a harness simulation that does exactly this — it is not required behavior, just a demonstration of what an AI agent would do.
+`examples/run_nerv_example.sh` is a harness simulation that does exactly this — it is not required behavior, just a demonstration of what an AI agent would do.
 
 ## Resource limits
 

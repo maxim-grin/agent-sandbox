@@ -83,7 +83,7 @@ docker run --rm -i \
   -v "$JOB_SPEC":/job/spec.json:ro \
   -v "$RESULTS_VOLUME":/sandbox/results \
   -v "$WORKSPACE_VOLUME":/sandbox/workspace \
-  -v "$REPO_ROOT/projects":/sandbox/projects:ro \
+  -v "$REPO_ROOT/projects/$PROJECT_TYPE":/sandbox/project:ro \
   "$SUPERVISOR_IMAGE"
 
 STATUS=$?

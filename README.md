@@ -8,10 +8,12 @@ A Docker-based execution environment for AI coding agents. The sandbox provides 
 
 ```
 Host
-├── run_job.sh              # builds images, creates per-run Docker resources, starts supervisor
+├── scripts/run_job.sh      # builds images, creates per-run Docker resources, starts supervisor
+├── examples/               # harness simulations (not used by the sandbox itself)
 │
 └── Supervisor container    # stack-agnostic orchestrator
     ├── clones the repo into the workspace volume
+    ├── copies projects/<project_type>/CLAUDE.md → /workspace/AGENT_GUIDE.md
     ├── starts the project's worker stack via docker compose
     ├── signals SANDBOX_READY on stdout
     └── accepts agent commands on stdin (EXEC / HEALTHCHECK / DONE)
@@ -43,6 +45,12 @@ projects/
 ├── medplum/      Node 22 + PostgreSQL + Redis — see projects/medplum/README.md
 └── eshoponweb/   .NET SDK 10, in-memory EF Core (no SQL Server) — see projects/eshoponweb/README.md
 ```
+
+Each project directory contains:
+
+- `docker-compose.yml` — worker + data service containers
+- `worker/Dockerfile` — runtime image for the stack
+- `CLAUDE.md` — agent guide: standard commands, health endpoint, key files, failure signals. The supervisor copies this into the workspace as `AGENT_GUIDE.md` before signalling `SANDBOX_READY`.
 
 ---
 
@@ -162,7 +170,7 @@ Data services (Redis, PostgreSQL) use compose-managed volumes that are removed b
 
 - Runs with the Docker socket mounted read-only (`/var/run/docker.sock:ro`)
 - The Docker socket is the primary trust boundary. In production, replace with a rootless Docker daemon, Docker-in-Docker sidecar, or a scoped container runtime API (e.g. containerd).
-- The `projects/` directory is mounted read-only
+- Only the single project directory (`projects/<project_type>/`) is mounted read-only as `/sandbox/project` — the supervisor cannot access other project stacks
 
 ### Network
 
@@ -245,6 +253,8 @@ docker volume rm <run-id>-results <run-id>-workspace
 
 This sandbox is **not a CI pipeline**. It provides an isolated environment with the right runtime, a cloned workspace, and a way to execute arbitrary commands. The AI agent decides what to install, build, test, and run by reading the project's own manifests (`package.json`, `Dockerfile`, etc.).
 
-Any script that infers build/test/run commands and executes them is a **harness simulation** — a demonstration of what an agent would do. Each project directory contains its own example; see the project READMEs.
+Any script that infers build/test/run commands and executes them is a **harness simulation** — a demonstration of what an agent would do. These live in `examples/` and are not mounted into the sandbox.
 
-Agent guidance (workspace inspection strategy, command protocol details, failure interpretation) lives in `CLAUDE.md`.
+Each project ships a `CLAUDE.md` describing its standard workflow (install → build → test → start), health endpoint, key files, and failure signals. The supervisor copies it into the workspace as `AGENT_GUIDE.md` so a real agent finds it during normal workspace inspection alongside `package.json` and other manifests.
+
+General agent guidance (workspace inspection strategy, command protocol, failure interpretation) lives in the top-level `CLAUDE.md`.
