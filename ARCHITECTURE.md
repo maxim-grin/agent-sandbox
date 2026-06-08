@@ -49,35 +49,19 @@ sequenceDiagram
 ## Container Topology (per run)
 
 ```mermaid
-graph TD
+graph LR
     subgraph HOST["Host"]
         hs["run_job.sh"]
-        hr["run_results/&lt;type&gt;/&lt;run_id&gt;/\n  result.json\n  logs/*.log"]
+        hr["run_results/\n  result.json\n  logs/*.log"]
     end
 
     subgraph DOCKER["Docker — isolated per RUN_ID"]
         subgraph NET["Sandbox Network"]
-            subgraph SUP["Supervisor  (256 MB / 0.5 CPU)"]
-                e["entrypoint.sh"]
-                o["orchestrate.sh"]
-                x["exec.sh"]
-                c["capture.sh"]
-                cl["clone.sh"]
-            end
+            SUP["Supervisor\ncontainer"]
 
-            subgraph NERV["nerv stack"]
-                nw["worker\nNode 20 Alpine\n1 GB / 2 CPU"]
-                nr["Redis 7\n128 MB / 0.5 CPU"]
-            end
-
-            subgraph MEDPLUM["medplum stack"]
-                mw["worker\nNode 22 Alpine\n8 GB / 2 CPU"]
-                mp["PostgreSQL 16\n1 GB / 1 CPU"]
-                mr["Redis 7\n192 MB / 0.5 CPU"]
-            end
-
-            subgraph ESHOP["eshoponweb stack"]
-                ew["worker\n.NET SDK 10\n2 GB / 2 CPU"]
+            subgraph STACK["Worker Stack  (project_type)"]
+                W["Worker container\n(language toolchain)"]
+                DS["Data service(s)\n(optional)"]
             end
         end
 
@@ -85,22 +69,17 @@ graph TD
         RV[("results\nvolume")]
     end
 
-    hs -->|"docker run -i\n+ Docker socket ro"| SUP
-    e --> cl --> WV
-    e --> o -->|"docker compose up"| NERV & MEDPLUM & ESHOP
-    e --> x -->|"docker exec worker"| nw & mw & ew
-    x --> RV
-    e --> c --> RV
-    nw <--> WV
-    mw <--> WV
-    ew <--> WV
-    nw <--> RV
-    mw <--> RV
-    ew <--> RV
-    mw --- mp
-    mw --- mr
-    nw --- nr
-    RV -->|"alpine copy-out"| hr
+    hs -->|"docker run -i\n+ Docker socket :ro"| SUP
+    SUP -->|"git clone → "| WV
+    SUP -->|"docker compose up"| STACK
+    SUP -->|"docker exec worker"| W
+    SUP -->|"result.json + logs"| RV
+
+    W <-->|"/workspace"| WV
+    W <-->|"/sandbox/results"| RV
+    W --- DS
+
+    RV -->|"copy-out"| hr
 ```
 
 ---
