@@ -16,6 +16,14 @@ When the AI hits an external dependency it can't reach (e.g. a CDN blocked by th
 
 **Better approach:** Surface blocked domains or missing external access explicitly ("cdnjs.cloudflare.com is blocked — should I request it be unblocked?") before attempting workarounds.
 
+### AI jumps to implementation before plan is stable
+
+When given a feature request, the AI tends to start writing files immediately rather than iterating on the design until it's correct. Plans presented too early are based on incomplete information and change when the user supplies missing context — wasting implementation work that then needs to be reverted.
+
+In the OpenHands session (2026-06-09): the plan went through three rounds of correction before being approved — missing YAML in the user's example, wrong directory name (`projects/openhands/` → `agent/`), wrong compose strategy (separate file → integrate into existing files via profiles). If implementation had started after the first plan, all of it would have been wrong.
+
+**Better approach:** Present plan, collect corrections, re-present, repeat until user explicitly approves. Only then implement. For architecture changes: update docs first, implement second — docs force precision and catch design errors cheaply.
+
 ---
 
 ## eShopOnWeb Stack Addition (2026-06-06)
