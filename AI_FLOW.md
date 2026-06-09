@@ -300,3 +300,39 @@ In harness mode, the supervisor writes `result.json` by tracking `EXIT_CODE` res
 ### `project_name` vs `project_type` in results path
 
 Harness mode uses `project_type` (from job spec: `nerv`, `medplum`, `eshoponweb`). Agent mode derives `project_name` from `repo_url` (last segment, `.git` stripped). For `https://github.com/org/nerv.git` → `nerv`. This keeps result paths consistent with the actual repo being tested, regardless of which agent ran it.
+
+---
+
+## Harness Script Consolidation (2026-06-09)
+
+### `run_job.sh` removed
+
+`run_job.sh` was a wrapper that built images, created Docker resources, ran the supervisor, copied results, and tore down. The example scripts (`examples/run_*_example.sh`) already do all of this directly — they build images, create network/volumes, start the supervisor via `docker run -i`, send EXEC/HEALTHCHECK/DONE commands, copy results, and clean up. `run_job.sh` added a layer without adding capability.
+
+Deleted. `scripts/` now contains only `run_agent.sh`. Harness mode is driven exclusively through example scripts.
+
+---
+
+## Per-Project Agent Prompts (2026-06-09)
+
+### Single generic prompt replaced by per-project prompts
+
+Initial implementation used one `agent/prompts/pipeline_task.txt` shared across all project types. The generic prompt told OpenHands to figure out build/test/start/healthcheck from repo manifests alone.
+
+Problem: each project has non-obvious stack quirks that cause agent failures or wasted discovery cycles. A capable LLM can eventually find these by trial and error, but the sandbox has time limits and the failures are predictable — the same quirks appear on every run. Embedding known context in the prompt short-circuits dead ends without removing the agent's autonomy over actual commands.
+
+Per-project prompts at `projects/<type>/prompt.txt` capture:
+- Runtime version requirements (e.g. Node 22 not 20 for Medplum)
+- Data service connection details already set in env (no discovery needed)
+- Known setup steps not inferable from manifests (e.g. Medplum test database creation, `medplum_test_readonly` role, post-seed grants)
+- Known entry-point quirks (e.g. Medplum's `import.meta.main` guard requiring a start shim)
+- Correct health check routes (e.g. eShopOnWeb's `/api_health_check`, not `/health` or `/healthz`)
+- Test suite constraints (e.g. exclude FunctionalTests for eShopOnWeb, use `--maxWorkers=2` for Medplum)
+
+### No fallback on missing prompt
+
+`run_agent.sh` errors immediately if `projects/${PROJECT_TYPE}/prompt.txt` does not exist. A silent fallback to a generic prompt would let a misconfigured run proceed with a worse-quality prompt, producing confusing results. Explicit failure forces a prompt to be written before the project type can be used.
+
+### Prompts live inside the project directory
+
+Prompt files are co-located with the project's `docker-compose.yml` and `worker/` under `projects/<type>/`. All project-specific artifacts in one place — adding a new stack means touching only that stack's directory (plus schema enum and examples).
