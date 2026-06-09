@@ -6,44 +6,6 @@ AI agent sandbox: isolated Docker environment where an agent drives build/test/r
 
 ---
 
-## Harness Mode — Job Lifecycle
-
-```mermaid
-sequenceDiagram
-    participant H as Harness Script
-    participant R as run_job.sh
-    participant S as Supervisor
-    participant W as Worker Stack
-
-    H->>R: job spec JSON {project_type, repo_url, commit}
-    R->>R: build supervisor + worker images
-    R->>R: create network, workspace vol, results vol
-    R->>S: docker run -i (supervisor container)
-    S->>S: parse job spec
-    S->>S: clone repo → workspace volume
-    S->>W: docker compose up (worker + data services)
-    W-->>S: healthcheck passes
-    S-->>H: SANDBOX_READY
-
-    loop Agent command loop
-        H->>S: EXEC <label> <cmd>
-        S->>W: docker exec --user sandboxuser sh -c <cmd>
-        W-->>S: stdout/stderr → logs/<label>.log
-        S-->>H: EXIT_CODE <label> <code>
-
-        H->>S: HEALTHCHECK <url>
-        S-->>H: HEALTHCHECK_STATUS <code>
-    end
-
-    H->>S: DONE
-    S->>S: write result.json
-    S->>W: docker compose down -v
-    R->>R: copy results → run_results/<project>/<run_id>/
-    R->>R: rm network + volumes
-```
-
----
-
 ## Agent Mode — Job Lifecycle
 
 ```mermaid
@@ -76,7 +38,7 @@ sequenceDiagram
 ```mermaid
 graph LR
     subgraph HOST["Host"]
-        hs["run_job.sh\nor run_agent.sh"]
+        hs["run_agent.sh\nor example script"]
         hr["run_results/\n  result.json\n  logs/"]
     end
 
@@ -95,7 +57,7 @@ graph LR
         RV[("results\nvolume")]
     end
 
-    hs -->|"harness: docker run -i\n+ Docker socket :ro"| SUP
+    hs -->|"example scripts:\ndocker run -i + socket :ro"| SUP
     hs -->|"agent: docker compose\n--profile agent"| OH
     SUP -->|"git clone →"| WV
     SUP -->|"docker compose up"| STACK
@@ -119,7 +81,6 @@ graph LR
 
 | Component | Mode | Responsibility |
 |-----------|------|---------------|
-| `run_job.sh` | harness | Build images; create network + volumes; run supervisor; copy results; teardown |
 | `run_agent.sh` | agent | Load `.env`; clone repo; start compose `--profile agent`; wait for OpenHands exit; copy results; teardown |
 | `supervisor/entrypoint.sh` | harness | Parse job spec; clone repo; start stack; EXEC/HEALTHCHECK/DONE loop; write `result.json`; teardown |
 | `lib/clone.sh` | harness | `git clone` repo at commit into workspace volume |
@@ -128,7 +89,7 @@ graph LR
 | `lib/capture.sh` | harness | Write structured `result.json` |
 | `projects/<type>/worker/Dockerfile` | harness | Language toolchain image (non-root `sandboxuser` UID 1001) |
 | `projects/<type>/docker-compose.yml` | both | Worker + data services (default); OpenHands service (`profiles: [agent]`) |
-| `agent/prompts/pipeline_task.txt` | agent | Task prompt; injected as `TASK` env var into OpenHands command |
+| `projects/<type>/prompt.txt` | agent | Per-project task prompt (stack context + known quirks); injected as `TASK` env var into OpenHands command |
 | `.example.env` / `.env` | agent | LLM credentials: `LLM_MODEL`, `GROQ_API_KEY`, `LLM_BASE_URL` |
 
 ---

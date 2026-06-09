@@ -1,0 +1,63 @@
+Analyze this Medplum monorepo (Node.js/TypeScript, Turborepo) and run the full pipeline.
+
+## Environment
+
+- Runtime: Node 22 (required — uses Promise.withResolvers and native WebSocket)
+- PostgreSQL at postgres:5432 — POSTGRES_HOST, POSTGRES_PORT, DATABASE_URL env vars are set
+  - Main DB: medplum (user: medplum, password: medplum)
+  - Test DB: medplum_test — you must CREATE it before running tests
+  - Also create role medplum_test_readonly and grant SELECT on all tables after schema creation
+- Redis at redis://redis:6379 — REDIS_URL, MEDPLUM_REDIS_HOST, MEDPLUM_REDIS_PORT are set
+- Workspace: /workspace
+- Results: /sandbox/results/result.json
+
+## Known quirks
+
+### Build
+- Package manager: npm (not pnpm). Monorepo uses npm workspaces + Turborepo.
+- Build server and its full dependency chain: `npx turbo run build --filter=@medplum/server...`
+  (the trailing `...` is required to include transitive workspace deps)
+- TypeScript compilation peaks at ~1.8 GB heap — set NODE_OPTIONS=--max-old-space-size=1800
+
+### Database setup for tests
+- `npm run migrate` is a migration FILE GENERATOR for developers, not a schema applier — do not use it.
+- Schema + seed for medplum_test: run `npm run test:seed` (executes seed.test.ts which calls initAppServices with runMigrations=true)
+- After seeding, grant: GRANT SELECT ON ALL TABLES IN SCHEMA public TO medplum_test_readonly
+
+### Test suite
+- Run tests with: npx jest --maxWorkers=2 (parallel workers prevent peak memory accumulation)
+- Some tests require non-empty config values for Google OAuth / reCAPTCHA — use placeholder strings, not empty strings
+- Expect one pre-existing upstream failure in src/index.test.ts ("Queue DispatchQueue already registered") — not fixable in sandbox, exclude it or accept it
+
+### Server start
+- packages/server/dist/index.js guards entrypoint with `if (import.meta.main)` — Node.js never sets this, so the binary never starts when invoked directly
+- Create a shim: packages/server/dist/start.mjs that imports and calls runFromCli() explicitly
+- Start command: node packages/server/dist/start.mjs
+
+### Health check
+- Read the server's config or source to find the health endpoint and port
+
+## Pipeline
+
+1. npm install
+2. Build server: npx turbo run build --filter=@medplum/server...
+3. Set up test database (create medplum_test, seed schema, grant readonly role)
+4. Run tests: npx jest --maxWorkers=2
+5. Start server in background
+6. Probe health endpoint
+
+## Result
+
+Write structured JSON to /sandbox/results/result.json:
+
+{
+  "status": "success or failure",
+  "build":        { "status": "...", "command": "...", "exit_code": 0,   "logs": "..." },
+  "start_server": { "status": "...", "command": "...",                    "logs": "..." },
+  "tests":        { "status": "...", "command": "...", "passed": 0, "failed": 0, "logs": "..." },
+  "health_check": { "status": "...", "url": "...", "response_code": 200, "logs": "..." },
+  "errors":       [],
+  "duration_seconds": 0
+}
+
+Do not ask for confirmation. Run autonomously.

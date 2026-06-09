@@ -243,9 +243,9 @@ All three are configurable via `.env` at the repo root or shell environment, so 
 
 ### Separate harness simulations from operational scripts
 
-Example scripts that simulate an AI agent session (`run_<type>_example.sh`) were co-located with `run_job.sh` in `scripts/`. Mixing them creates ambiguity: a real agent scanning `scripts/` might treat the example scripts as part of the sandbox interface.
+Example scripts that simulate an AI agent session (`run_<type>_example.sh`) were co-located with the runner scripts in `scripts/`. Mixing them creates ambiguity: a real agent scanning `scripts/` might treat the example scripts as part of the sandbox interface.
 
-Moved to `examples/`. The `scripts/` directory now contains only `run_job.sh` — the one script an agent or harness actually needs to invoke. The examples are human-readable demonstrations; they belong outside the operational surface.
+Moved to `examples/`. The `scripts/` directory now contains only `run_agent.sh`. The examples are human-readable demonstrations; they belong outside the operational surface.
 
 ### Agent should not see previous run history
 
@@ -264,7 +264,7 @@ Arguments for giving agents history were considered and rejected:
 
 Previously all run directories were flat under `run_results/<run-id>/`. Reorganised to `run_results/<project>/<run-id>/` so runs for different repos don't mix.
 
-For harness mode (`run_job.sh`), `project` = `project_type` from the job spec.  
+For harness mode, `project` = `project_type` from the job spec.  
 For agent mode (`run_agent.sh`), `project` = last path segment of `repo_url` (`.git` stripped) — there is no `project_type` concept when OpenHands evaluates arbitrary repos.
 
 ---
@@ -285,7 +285,7 @@ Solution: add OpenHands as a `profiles: [agent]` service inside each existing pr
 
 ### Prompt as file, not hardcoded YAML
 
-Embedding the task prompt directly in `command:` in the compose YAML makes it hard to iterate on prompt wording without touching infrastructure files. Prompt lives in `agent/prompts/pipeline_task.txt`. Runner reads it, exports as `TASK`, compose substitutes `${TASK}` into the OpenHands command. Change prompt → edit one file, no YAML diff.
+Embedding the task prompt directly in `command:` in the compose YAML makes it hard to iterate on prompt wording without touching infrastructure files. Prompts live in `projects/<project_type>/prompt.txt` — one file per project type, containing stack-specific context and known quirks discovered during runs. Runner reads `projects/${PROJECT_TYPE}/prompt.txt`, exports as `TASK`, compose substitutes `${TASK}` into the OpenHands command. Change prompt → edit one file, no YAML diff.
 
 ### No Docker socket for OpenHands
 

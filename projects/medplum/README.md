@@ -33,7 +33,7 @@ cat > /tmp/medplum-job.json <<'EOF'
 }
 EOF
 
-./scripts/run_job.sh /tmp/medplum-job.json
+./scripts/run_agent.sh /tmp/medplum-job.json
 ```
 
 ## Resource limits

@@ -30,7 +30,7 @@ cat > /tmp/nerv-job.json <<'EOF'
 }
 EOF
 
-./scripts/run_job.sh /tmp/nerv-job.json
+./scripts/run_agent.sh /tmp/nerv-job.json
 ```
 
 ## Resource limits

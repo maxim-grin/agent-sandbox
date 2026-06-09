@@ -1,0 +1,34 @@
+Analyze this Node.js/TypeScript repository and run the full pipeline.
+
+## Environment
+
+- Runtime: Node 20
+- Redis available at redis://redis:6379 (REDIS_URL env var is already set)
+- Workspace: /workspace
+- Results: /sandbox/results/result.json
+
+## Pipeline
+
+1. Install dependencies (npm install)
+2. Build (npm run build)
+3. Run tests (npm test)
+4. Start server in background
+5. Probe health endpoint
+
+Read package.json to discover the exact build, test, and start scripts. Read README or source to find the health check route and port.
+
+## Result
+
+Write structured JSON to /sandbox/results/result.json:
+
+{
+  "status": "success or failure",
+  "build":        { "status": "...", "command": "...", "exit_code": 0,   "logs": "..." },
+  "start_server": { "status": "...", "command": "...",                    "logs": "..." },
+  "tests":        { "status": "...", "command": "...", "passed": 0, "failed": 0, "logs": "..." },
+  "health_check": { "status": "...", "url": "...", "response_code": 200, "logs": "..." },
+  "errors":       [],
+  "duration_seconds": 0
+}
+
+Do not ask for confirmation. Run autonomously.

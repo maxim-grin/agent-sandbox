@@ -53,6 +53,30 @@ services:
       retries: 3
       start_period: 10s
 
+  openhands:
+    image: openhands/openhands:latest
+    profiles: [agent]
+    container_name: "${RUN_ID}-eshoponweb-openhands"
+    environment:
+      - LLM_MODEL=${LLM_MODEL}
+      - LLM_API_KEY=${GROQ_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_USE_JSON_MODE=true
+      - OPENHANDS_ALWAYS_APPROVE=true
+      - TASK=${TASK}
+      - UseOnlyInMemoryDatabase=true
+      - ASPNETCORE_URLS=http://0.0.0.0:5000
+    volumes:
+      - workspace:/workspace
+      - results:/sandbox/results
+    networks:
+      - sandbox
+    stdin_open: true
+    tty: true
+    command: >-
+      openhands --headless --json --always-approve
+      -t "${TASK}" --workspace /workspace
+
 networks:
   sandbox:
     external: true

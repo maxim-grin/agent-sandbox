@@ -29,7 +29,7 @@ End-to-end pipeline run:
 
 | Mode | Runner | Who decides commands | When to use |
 |------|--------|----------------------|-------------|
-| **Harness** | `scripts/run_job.sh` + example script | Harness script (hardcoded or scripted) | Deterministic demo, debugging |
+| **Harness** | example scripts | Harness script (hardcoded or scripted) | Deterministic demo, debugging |
 | **Agent** | `scripts/run_agent.sh` | OpenHands LLM agent (autonomous) | Real AI evaluation of unknown repos |
 
 Both modes share: same Docker network/volume pattern, same `run_results/{project}/{runid}/` output, same `result.json` schema.
@@ -38,7 +38,7 @@ Both modes share: same Docker network/volume pattern, same `run_results/{project
 
 ## Adding a New Project Stack
 
-Four things to create — no supervisor changes needed.
+Five things to create — no supervisor changes needed.
 
 ### 1. `projects/<type>/worker/Dockerfile`
 
@@ -127,7 +127,11 @@ volumes:
 
 `profiles: [agent]` means: supervisor's `docker compose up -d` (no profile) does NOT start OpenHands. Only `run_agent.sh` (passes `--profile agent`) starts it.
 
-### 3. Schema + harness example script
+### 3. `projects/<type>/prompt.txt`
+
+Agent task prompt for this stack. Include: runtime version, data service URLs (env vars already set), known quirks (e.g. monorepo build flags, health check route, test database setup). See existing prompts for format.
+
+### 4. Schema + harness example script
 
 - Add `"<type>"` to `project_type` enum in `schemas/job_spec.schema.json`.
 - Add `examples/run_<type>_example.sh` matching existing examples: build images, create Docker resources, start supervisor, send EXEC/HEALTHCHECK/DONE commands, print result summary.
@@ -158,13 +162,13 @@ LLM_BASE_URL=https://api.groq.com/openai/v1
 
 ### Prompt
 
-Task prompt lives in `agent/prompts/pipeline_task.txt`. Not hardcoded in YAML.  
-`run_agent.sh` reads it → exports `TASK` env var → compose substitutes into command.
+Task prompt lives in `projects/<project_type>/prompt.txt` — one file per project type. Not hardcoded in YAML.  
+`run_agent.sh` reads `projects/${PROJECT_TYPE}/prompt.txt` → exports `TASK` env var → compose substitutes into command. Errors if no prompt file exists for the given project type.
 
 ### Running
 
 ```bash
-# same job spec as run_job.sh
+
 ./scripts/run_agent.sh job_specs/nerv.json
 ```
 
@@ -198,7 +202,7 @@ run_results/{project_name}/{runid}/
 
 ## Harness Mode: Driving the Sandbox (EXEC protocol)
 
-Used by example scripts (`examples/run_*_example.sh`) and `run_job.sh`.
+Used by example scripts (`examples/run_*_example.sh`).
 
 Once `SANDBOX_READY` prints, write commands to supervisor stdin:
 

@@ -1,0 +1,55 @@
+Analyze this ASP.NET Core / C# repository (eShopOnWeb) and run the full pipeline.
+
+## Environment
+
+- Runtime: .NET SDK 10
+- No SQL Server — UseOnlyInMemoryDatabase=true is already set (EF Core in-memory mode)
+- ASPNETCORE_URLS=http://0.0.0.0:5000 is already set (HTTP only, no HTTPS)
+- ASPNETCORE_ENVIRONMENT=Development
+- Workspace: /workspace
+- Results: /sandbox/results/result.json
+
+## Known quirks
+
+### Build
+- Use: dotnet build
+- UseOnlyInMemoryDatabase=true activates in-memory EF Core contexts — no database container needed
+
+### Tests
+- Run integration tests: dotnet test tests/IntegrationTests/
+- Skip FunctionalTests — they require Playwright/browser and cannot run headless in this container
+- The test project already references Microsoft.EntityFrameworkCore.InMemory — no extra config needed
+
+### Server start
+- Use --no-launch-profile to prevent launchSettings.json from overriding ASPNETCORE_URLS:
+  dotnet run --no-launch-profile --project src/Web/Web.csproj
+- HTTPS redirection middleware is a no-op when no HTTPS port is bound — HTTP-only is fine
+- Program.cs calls AddAspireServiceDefaults() — this is lightweight, does not require Aspire orchestrator
+
+### Health check
+- There is no /health or /healthz route
+- Program.cs registers: /home_page_health_check and /api_health_check
+- Probe: http://localhost:5000/api_health_check
+
+## Pipeline
+
+1. dotnet build
+2. dotnet test tests/IntegrationTests/
+3. Start server in background: dotnet run --no-launch-profile --project src/Web/Web.csproj
+4. Wait for server to bind, then probe: http://localhost:5000/api_health_check
+
+## Result
+
+Write structured JSON to /sandbox/results/result.json:
+
+{
+  "status": "success or failure",
+  "build":        { "status": "...", "command": "...", "exit_code": 0,   "logs": "..." },
+  "start_server": { "status": "...", "command": "...",                    "logs": "..." },
+  "tests":        { "status": "...", "command": "...", "passed": 0, "failed": 0, "logs": "..." },
+  "health_check": { "status": "...", "url": "...", "response_code": 200, "logs": "..." },
+  "errors":       [],
+  "duration_seconds": 0
+}
+
+Do not ask for confirmation. Run autonomously.

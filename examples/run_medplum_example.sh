@@ -23,7 +23,7 @@
 # Usage:
 #   ./examples/run_medplum_example.sh
 #
-# The script drives run_job.sh internally with a pre-built job spec for Medplum.
+# The script builds images and drives the supervisor directly (does not use run_agent.sh).
 # =============================================================================
 set -euo pipefail
 

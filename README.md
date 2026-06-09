@@ -8,10 +8,8 @@ Docker-based execution environment for AI coding agents. Sandbox provides isolat
 
 ```
 Host
-├── scripts/run_job.sh       # harness mode: build images, start supervisor, drive via EXEC protocol
 ├── scripts/run_agent.sh     # agent mode: clone, start OpenHands, wait for autonomous completion
 ├── examples/                # harness simulations (deterministic demos)
-├── agent/prompts/           # task prompts for OpenHands agent
 │
 ├── Supervisor container     # harness mode only — stack-agnostic orchestrator
 │   ├── clones repo into workspace volume
@@ -33,7 +31,7 @@ Host
 
 | Mode | Runner | Who decides commands | Use when |
 |------|--------|----------------------|----------|
-| **Harness** | `run_job.sh` + example script | Script (hardcoded workflow) | Deterministic demo, debugging |
+| **Harness** | example scripts | Script (hardcoded workflow) | Deterministic demo, debugging |
 | **Agent** | `run_agent.sh` | OpenHands LLM (autonomous) | Real AI evaluation of unknown repos |
 
 Both modes: same Docker network/volume pattern, same `run_results/{project}/{runid}/` output.
@@ -120,7 +118,7 @@ LLM_BASE_URL=https://api.groq.com/openai/v1
 
 ### Prompt
 
-Task prompt: `agent/prompts/pipeline_task.txt`. Runner reads file → exports `TASK` → compose substitutes into OpenHands command. Edit prompt to change agent behavior without touching compose files.
+Task prompt: `projects/<project_type>/prompt.txt` — one file per project, containing stack-specific context and known quirks. Runner reads `projects/${PROJECT_TYPE}/prompt.txt` → exports `TASK` → compose substitutes into OpenHands command. Errors if no prompt file exists for the project type.
 
 ### How it works
 
@@ -287,7 +285,7 @@ TIMEOUT_EXEC=900
 TIMEOUT_STACK_HEALTHY=60
 ```
 
-`run_job.sh` sources `.env` automatically.
+`run_agent.sh` sources `.env` automatically.
 
 ---
 

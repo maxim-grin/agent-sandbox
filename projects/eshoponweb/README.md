@@ -31,7 +31,7 @@ cat > /tmp/eshoponweb-job.json <<'EOF'
 }
 EOF
 
-./scripts/run_job.sh /tmp/eshoponweb-job.json
+./scripts/run_agent.sh /tmp/eshoponweb-job.json
 ```
 
 ## Resource limits
