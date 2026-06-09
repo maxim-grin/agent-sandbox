@@ -1,5 +1,15 @@
 # AI Agent Sandbox
 
+## Response style
+
+Respond like smart caveman. Cut all filler, keep technical substance.
+
+- Drop articles (a, an, the), filler (just, really, basically, actually).
+- Drop pleasantries (sure, certainly, happy to).
+- No hedging. Fragments fine. Short synonyms.
+- Technical terms stay exact. Code blocks unchanged.
+- Pattern: [thing] [action] [reason]. [next step].
+
 ## General Notes
 
 - Don't scan `.git` — no useful info there.
@@ -8,13 +18,27 @@
 ## Pipeline Run Procedure
 
 End-to-end pipeline run:
+
 1. **Single run** only.
 2. Concise report: passed, failed, root causes, fix options.
 3. **Stop** — don't re-run with fix applied. Ask user first.
 
+---
+
+## Two Runner Modes
+
+| Mode | Runner | Who decides commands | When to use |
+|------|--------|----------------------|-------------|
+| **Harness** | `scripts/run_job.sh` + example script | Harness script (hardcoded or scripted) | Deterministic demo, debugging |
+| **Agent** | `scripts/run_agent.sh` | OpenHands LLM agent (autonomous) | Real AI evaluation of unknown repos |
+
+Both modes share: same Docker network/volume pattern, same `run_results/{project}/{runid}/` output, same `result.json` schema.
+
+---
+
 ## Adding a New Project Stack
 
-Three things to create — no supervisor changes needed.
+Four things to create — no supervisor changes needed.
 
 ### 1. `projects/<type>/worker/Dockerfile`
 
@@ -35,6 +59,8 @@ CMD ["sleep", "infinity"]
 ```
 
 ### 2. `projects/<type>/docker-compose.yml`
+
+Worker + data services (existing pattern) **plus** OpenHands service for agent mode:
 
 ```yaml
 services:
@@ -63,7 +89,27 @@ services:
       start_period: 10s
 
   # optional data service containers (postgres, redis, …)
-  # use compose-managed (not external) volumes so `docker compose down -v` cleans them up
+
+  openhands:
+    image: openhands/openhands:latest
+    profiles: [agent]
+    container_name: "${RUN_ID}-<type>-openhands"
+    environment:
+      - LLM_MODEL=${LLM_MODEL}
+      - LLM_API_KEY=${GROQ_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_USE_JSON_MODE=true
+      - OPENHANDS_ALWAYS_APPROVE=true
+      - TASK=${TASK}
+    volumes:
+      - workspace:/workspace
+      - results:/sandbox/results
+    networks: [sandbox]
+    stdin_open: true
+    tty: true
+    command: >-
+      openhands --headless --json --always-approve
+      -t "${TASK}" --workspace /workspace
 
 networks:
   sandbox:
@@ -79,40 +125,80 @@ volumes:
     name: "${RESULTS_VOLUME}"
 ```
 
-### 3. Schema + example script
+`profiles: [agent]` means: supervisor's `docker compose up -d` (no profile) does NOT start OpenHands. Only `run_agent.sh` (passes `--profile agent`) starts it.
+
+### 3. Schema + harness example script
 
 - Add `"<type>"` to `project_type` enum in `schemas/job_spec.schema.json`.
-- Add `scripts/run_<type>_example.sh` matching existing example scripts: build images, create Docker resources, start supervisor, send EXEC/HEALTHCHECK/DONE commands, print result summary.
+- Add `examples/run_<type>_example.sh` matching existing examples: build images, create Docker resources, start supervisor, send EXEC/HEALTHCHECK/DONE commands, print result summary.
 
 ### Key invariants
 
-- **Container name** must be `${RUN_ID}-<type>-worker-1`. Supervisor hardcodes this in `orchestrate.sh` (worker healthcheck) and `exec.sh` (EXEC routing).
-- **Network and volumes are external** — harness creates before compose, destroys after. Never `driver: local` in compose file.
-- **Non-root only** — agent commands run as `sandboxuser` (UID 1001). Verify runtime image supports non-root; some base images need extra setup (e.g. `chmod` on global tool dirs).
-- **EXEC word-splitting** — `sandbox_exec` joins everything after label with `$*`, passes to `sh -c`. Shell operators (`&`, `&&`, pipes) work. Args with internal spaces need `env VAR=val cmd` or `sh -c '...'` quoting, not `export VAR && cmd`.
+- **Worker container name** must be `${RUN_ID}-<type>-worker-1`. Supervisor hardcodes this in `orchestrate.sh` and `exec.sh`.
+- **OpenHands container name** follows `${RUN_ID}-<type>-openhands`. `run_agent.sh` uses this to wait for exit.
+- **Network and volumes are external** — runner creates before compose, destroys after. Never `driver: local`.
+- **Non-root only (worker)** — commands run as `sandboxuser` (UID 1001). OpenHands runs as its own user (accepted trade-off).
+- **EXEC word-splitting** — `sandbox_exec` joins args with `$*`, passes to `sh -c`. Shell operators work. Args with spaces need `env VAR=val cmd` quoting.
 
 ---
 
-## Agent Guidance: Using the Sandbox
+## OpenHands Agent Runner
 
-Sandbox is **not a CI pipeline**. Isolated env + cloned workspace + arbitrary command execution. Agent reads manifests, decides commands, interprets results.
+### Config
 
-### Workspace inspection
+Copy `.example.env` → `.env`, fill in keys:
 
-Avoid full recursive scan. Target only files describing build/test/run:
+```bash
+LLM_MODEL=groq/llama-3.1-8b-instant
+GROQ_API_KEY=
+LLM_BASE_URL=https://api.groq.com/openai/v1
+```
 
-| Priority | Files to read |
-|----------|--------------|
-| Always | `package.json` / `Cargo.toml` / `pyproject.toml` (or equivalent manifest) |
-| Always | `Dockerfile`, `docker-compose.yml`, `.dockerignore` |
-| Always | `README.md`, `CONTRIBUTING.md` (top-level only) |
-| If present | `tsconfig.json`, `jest.config.*`, `vitest.config.*`, `Makefile`, `.env.example` |
-| If present | CI config (`.github/workflows/`, `.gitlab-ci.yml`) |
-| Skip | `src/**`, `lib/**`, `dist/**`, `node_modules/**`, test fixtures, generated files |
+`.env` is gitignored. `.example.env` is committed.
 
-Reading every source file adds noise, bloats context, pulls in irrelevant details.
+### Prompt
 
-### Driving the sandbox
+Task prompt lives in `agent/prompts/pipeline_task.txt`. Not hardcoded in YAML.  
+`run_agent.sh` reads it → exports `TASK` env var → compose substitutes into command.
+
+### Running
+
+```bash
+# same job spec as run_job.sh
+./scripts/run_agent.sh job_specs/nerv.json
+```
+
+Runner: creates network/volumes → clones repo → starts compose with `--profile agent` → waits for OpenHands exit → copies results → tears down.
+
+### Results
+
+```
+run_results/{project_name}/{runid}/
+  result.json        ← written by OpenHands (prompt instructs format)
+  agent_output.log   ← captured stdout (OpenHands --json stream)
+```
+
+`project_name` derived from `repo_url` (last path segment, strip `.git`).
+
+### result.json schema (agent mode)
+
+```json
+{
+  "status": "success|failure",
+  "build":        { "status": "...", "command": "...", "exit_code": 0, "logs": "..." },
+  "start_server": { "status": "...", "command": "...", "logs": "..." },
+  "tests":        { "status": "...", "command": "...", "passed": 0, "failed": 0, "logs": "..." },
+  "health_check": { "status": "...", "url": "...", "response_code": 200, "logs": "..." },
+  "errors":       [],
+  "duration_seconds": 0
+}
+```
+
+---
+
+## Harness Mode: Driving the Sandbox (EXEC protocol)
+
+Used by example scripts (`examples/run_*_example.sh`) and `run_job.sh`.
 
 Once `SANDBOX_READY` prints, write commands to supervisor stdin:
 
@@ -122,97 +208,51 @@ Once `SANDBOX_READY` prints, write commands to supervisor stdin:
 
 Supervisor replies `EXIT_CODE <label> <code>` after each `EXEC`. Branch on non-zero before continuing.
 
+### Workspace inspection (for harness scripts)
+
+Avoid full recursive scan. Target only files describing build/test/run:
+
+| Priority   | Files to read |
+|------------|---------------|
+| Always     | `package.json` / `Cargo.toml` / `pyproject.toml` |
+| Always     | `Dockerfile`, `docker-compose.yml` |
+| Always     | `README.md`, `CONTRIBUTING.md` (top-level only) |
+| If present | `tsconfig.json`, `jest.config.*`, `Makefile`, `.env.example` |
+| If present | CI config (`.github/workflows/`, `.gitlab-ci.yml`) |
+| Skip       | `src/**`, `lib/**`, `dist/**`, `node_modules/**`, test fixtures |
+
 ### Interpreting failures
 
 - Exit code **137** = OOM kill. Needs more memory or leaner build.
 - Non-zero `test_exit_code` in `result.json` = tests failed; read `logs/test.log`.
 - `healthcheck_status` not 200 = service didn't start; read `logs/run.log`.
 
-Design and implement a **Docker-based AI agent sandbox**.
-
-Sandbox is **execution env for AI coding agents**, not CI. Generic enough for multiple stacks.
-
-Design priorities:
-
-- **Single sandbox + pluggable stack images**
-- **Separate data services per stack**
-- **Clean state per run**
-- **Non-interactive execution**
-- **Structured output capture**
-- Go deep on: **Security/isolation**, **resource management**, **build performance**
-
 ---
 
-## High-Level Architecture (Fixed Decisions)
+## Architecture
 
-Already decided — must be respected.
+Docker-based AI agent sandbox. Execution env for AI coding agents, not CI. Generic across stacks.
 
-### 1. Single sandbox + pluggable workers
-
-- AI harness sees **one sandbox type**, configurable per job.
-- Internally: **generic supervisor** (stack-agnostic) + **pluggable worker/stack containers**.
-- Supervisor knows **how to run a job**, not **how to build a specific project**.
-
-### 2. Separate data services per stack
-
-- Each stack has own **data service containers** (e.g., Redis, Postgres).
-- No shared databases between projects or runs.
-
-### 3. Clean state per run (must-have)
-
-Each run starts from **clean workspace** and **clean data**:
-- No leftover source code.
-- No leftover data service state.
-- Easy to spin up fresh, tear down deterministically.
-
-### 4. Non-interactive execution (must-have)
-
-Everything runs **headlessly** — no prompts, wizards, or license dialogs. Interactive tools must use flags/env vars.
-
-### 5. Structured output capture (must-have)
-
-Machine-readable results:
-- Clear **exit codes**.
-- **JSON result file** with status/summary.
-- Logs at known paths.
-
-### 6. Depth areas
-
-Go deeper than usual on: **security/isolation**, **resource management**, **build performance**.
-
----
-
-## Responsibilities: Sandbox vs AI Agent
-
-Critical separation.
+Design priorities: **single sandbox + pluggable stacks**, **separate data services per stack**, **clean state per run**, **non-interactive execution**, **structured output capture**.
 
 ### Sandbox responsibilities
 
-- **Isolated, reproducible env**: supervisor + stack worker containers, dedicated Docker network + volumes per run.
-- Tools/services for target stack (language toolchain, data services).
-- **Lifecycle + clean state**: fresh workspace, fresh data per run.
+- Isolated, reproducible env: supervisor + stack containers, dedicated Docker network + volumes per run.
+- Lifecycle + clean state: fresh workspace, fresh data per run.
 - Enforce: non-interactive, security/isolation, resource limits.
 - Capture: logs, structured `result.json`.
 
-### AI agent responsibilities
+### Agent responsibilities
 
-- Inspect repo contents in sandbox workspace (`package.json`, `Dockerfile`, `docker-compose.yml`, docs).
-- **Figure out** how to install deps, build, run tests, start service, probe healthcheck.
-- Decide concrete shell commands and order.
-- Execute via supervisor's execution entrypoint.
-- Interpret logs/result JSON and decide next steps.
+- Inspect repo manifests (`package.json`, `Dockerfile`, `docker-compose.yml`, docs).
+- Figure out how to install deps, build, run tests, start service, probe healthcheck.
+- Decide concrete commands and order.
+- Execute (via EXEC protocol in harness mode; autonomously in OpenHands mode).
+- Interpret logs/result and decide next steps.
 
-> Important:  
-> **Sandbox must not hard-code project-specific build/test/run commands.**  
-> Sandbox exposes env + arbitrary command execution; agent chooses commands based on manifest files, Dockerfile, project conventions.
+> Sandbox must not hard-code project-specific build/test/run commands. Sandbox exposes env + execution; agent chooses commands from manifest files.
 
----
-
-## Job Spec and Lifecycle
-
-Minimal job spec accepted by supervisor (JSON file or env vars).
-
-Example:
+### Job spec
 
 ```json
 {
@@ -222,132 +262,41 @@ Example:
 }
 ```
 
-No `build_command`/`test_command`/`run_command` fields. Spec only tells sandbox: stack type, repo, commit. Agent then reads files and decides commands.
+### Supervisor lifecycle (harness mode)
 
-### Supervisor responsibilities
-
-1. Accept job spec.
-2. Ensure **clean workspace** (e.g., `/sandbox/workspace`).
-3. Clone repo at specified commit.
+1. Parse job spec.
+2. Clean workspace.
+3. Clone repo at commit.
 4. Select worker stack from `project_type`.
 5. Orchestrate worker + data service containers.
-6. Provide arbitrary command execution in worker.
-7. Capture logs, produce structured result.
-8. Exit with clear success/failure code.
+6. Signal `SANDBOX_READY`.
+7. Accept EXEC/HEALTHCHECK/DONE commands on stdin.
+8. Capture logs, write `result.json`, exit.
 
-Include **simple driver script** (e.g., `run_<type>_example.sh`) imitating agent behavior — reads manifest, runs build/test/start in sequence. Must be labeled **example harness**, not core sandbox behavior.
+### Results layout
 
----
-
-## Workers
-
-Each stack worker provides: language toolchain, data services reachable at known host/port, arbitrary command execution.
-
-Acceptable patterns:
-- `docker-compose.<type>.yml` with worker + data service containers.
-- Or: dedicated worker image via `docker run` + separate data services on same network.
-
-Capabilities:
-- Run stack-appropriate build/test/start commands.
-- Respond to health check.
-- Non-interactive.
-
----
-
-## Results and Logs
-
-Standard layout:
-
-- `/sandbox/results/logs/build.log`
-- `/sandbox/results/logs/test.log`
-- `/sandbox/results/logs/run.log`
-- `/sandbox/results/result.json`
-
-`result.json` minimum:
-
-```json
-{
-  "status": "success",
-  "build_exit_code": 0,
-  "test_exit_code": 0,
-  "healthcheck_status": 200,
-  "duration_seconds": 123
-}
+```
+/sandbox/results/logs/build.log
+/sandbox/results/logs/test.log
+/sandbox/results/logs/run.log
+/sandbox/results/result.json
 ```
 
-Every run must produce `result.json` + logs. Supervisor exit code reflects overall success. External harness mounts/reads `/sandbox/results`.
+### Security
 
----
+Treat worker code as untrusted.
 
-## Clean State
+- **Filesystem**: limit mounts to workspace + results.
+- **Network**: dedicated Docker network per run.
+- **Container hardening**: non-root (sandboxuser), drop caps, `no-new-privileges`.
+- **Docker socket**: supervisor gets read-only socket to manage worker stack. OpenHands does not get socket (uses local runtime).
 
-Each run from known-clean state — no leftover workspace, no leftover data service state.
+### Resource limits
 
-Options: throwaway containers/volumes per run, or explicit reset logic. Document in `README.md`: how to start new run, how state leakage is prevented.
+Per-container CPU/memory limits defined in each `docker-compose.yml`. Exit code 137 = OOM. Supervisor timeout: `TIMEOUT_TOTAL` (default 1800s), `TIMEOUT_EXEC` (default 600s).
 
----
+### Build performance
 
-## Security and Isolation
-
-Treat worker code as **untrusted**.
-
-Minimums:
-- **Filesystem**: limit mounts to workspace + results. No host filesystem beyond that.
-- **Network**: dedicated Docker network. Restrict external outbound where reasonable.
-- **Container hardening**: non-root, drop unnecessary Linux capabilities, `no-new-privileges`.
-
-If supervisor orchestrates containers:
-- Minimize host Docker socket exposure.
-- Document tradeoffs (Docker socket vs. sidecar).
-- Call out remaining risks + production hardening path.
-
----
-
-## Resource Management
-
-Implement and document:
-- Per-container CPU/memory limits for supervisor, worker, data services.
-- Ephemeral volumes where possible. Avoid unbounded logs.
-
-Document: what happens when builds/tests hit limits, how harness interprets resource failures (OOM, timeouts).
-
----
-
-## Build Performance
-
-Design for **fast startup and iteration**:
-- Multi-stage builds — lean images.
-- Pre-install common tools to leverage layer caching.
-- Avoid unnecessary per-run work.
-
-Document: observed job run time, how to improve at scale (warm worker pools, shared caches, microVM sandboxes).
-
----
-
-## Deliverables
-
-1. **Docker configuration**
-   - `Dockerfile` for supervisor.
-   - Dockerfile(s) and/or `docker-compose` for each stack worker + data services.
-   - Helper scripts: `run_job.sh` (job spec entrypoint), `run_<type>_example.sh` (example harness simulation — labeled as such).
-
-2. **Documentation (`README.md`)**
-   - Architecture: supervisor + pluggable workers, example stack.
-   - Job spec and lifecycle.
-   - Clean state, security, resource limits, performance.
-   - Explicit: sandbox is **agent-oriented**, example scripts are **harness simulations**.
-
-3. **Proof it works**
-   - Build/start/run instructions.
-   - Evidence: project builds, tests pass, data services work, health check responds.
-   - Optional: example logs/result.json under `docs/`.
-
----
-
-## How to Start
-
-1. Propose concrete directory structure.
-2. Sketch supervisor and stack worker Dockerfiles and/or `docker-compose`.
-3. Implement: supervisor logic (spec → workspace → worker orchestration → result capture) + stack worker with data services.
-4. Add example script: reads manifest, infers build/test/start commands, executes for full example run.
-5. Write/update `README.md` — design and tradeoffs.
+- Multi-stage builds, lean images.
+- Pre-install common deps to leverage layer cache.
+- Shallow clone (`--depth=1`) for fast workspace setup.

@@ -1,6 +1,6 @@
 # AI Agent Sandbox
 
-A Docker-based execution environment for AI coding agents. The sandbox provides an isolated, reproducible workspace; the AI agent decides what to build, test, and run.
+Docker-based execution environment for AI coding agents. Sandbox provides isolated, reproducible workspace; AI agent decides what to build, test, and run.
 
 ---
 
@@ -8,65 +8,84 @@ A Docker-based execution environment for AI coding agents. The sandbox provides 
 
 ```
 Host
-├── scripts/run_job.sh      # builds images, creates per-run Docker resources, starts supervisor
-├── examples/               # harness simulations (not used by the sandbox itself)
+├── scripts/run_job.sh       # harness mode: build images, start supervisor, drive via EXEC protocol
+├── scripts/run_agent.sh     # agent mode: clone, start OpenHands, wait for autonomous completion
+├── examples/                # harness simulations (deterministic demos)
+├── agent/prompts/           # task prompts for OpenHands agent
 │
-└── Supervisor container    # stack-agnostic orchestrator
-    ├── clones the repo into the workspace volume
-    ├── copies projects/<project_type>/CLAUDE.md → /workspace/AGENT_GUIDE.md
-    ├── starts the project's worker stack via docker compose
-    ├── signals SANDBOX_READY on stdout
-    └── accepts agent commands on stdin (EXEC / HEALTHCHECK / DONE)
-        │
-        └── Worker stack (projects/<project_type>/)
-            ├── worker    runtime container, workspace volume mounted at /workspace
-            └── services  data services required by the stack (Redis, PostgreSQL, …)
+├── Supervisor container     # harness mode only — stack-agnostic orchestrator
+│   ├── clones repo into workspace volume
+│   ├── starts worker stack via docker compose
+│   ├── signals SANDBOX_READY on stdout
+│   └── accepts EXEC / HEALTHCHECK / DONE on stdin
+│       │
+│       └── Worker stack (projects/<project_type>/)
+│           ├── worker    runtime container, workspace volume at /workspace
+│           └── services  data services (Redis, PostgreSQL, …)
+│
+└── OpenHands container      # agent mode only — autonomous LLM agent
+    ├── reads cloned workspace at /workspace
+    ├── figures out runtime, deps, build, test, start, healthcheck
+    └── writes result.json to /sandbox/results/
 ```
 
-### Supervisor
+### Two runner modes
 
-The supervisor (`supervisor/`) is stack-agnostic. It knows how to:
+| Mode | Runner | Who decides commands | Use when |
+|------|--------|----------------------|----------|
+| **Harness** | `run_job.sh` + example script | Script (hardcoded workflow) | Deterministic demo, debugging |
+| **Agent** | `run_agent.sh` | OpenHands LLM (autonomous) | Real AI evaluation of unknown repos |
 
-- Accept a job spec (repo URL, project type, commit)
-- Clone the repo into a clean workspace
-- Select and start the right worker stack based on `project_type`
-- Relay agent commands into the worker via `docker exec`
-- Capture logs and write a structured `result.json`
-
-It does **not** know anything about npm, TypeScript, or any specific project.
+Both modes: same Docker network/volume pattern, same `run_results/{project}/{runid}/` output.
 
 ### Projects (pluggable worker stacks)
 
-Each subdirectory of `projects/` is a self-contained stack with a `docker-compose.yml` and a `worker/Dockerfile`. Adding a new stack requires no changes to the supervisor.
-
 ```
 projects/
-├── nerv/         Node 20 + Redis — see projects/nerv/README.md
-├── medplum/      Node 22 + PostgreSQL + Redis — see projects/medplum/README.md
-└── eshoponweb/   .NET SDK 10, in-memory EF Core (no SQL Server) — see projects/eshoponweb/README.md
+├── nerv/         Node 20 + Redis
+├── medplum/      Node 22 + PostgreSQL + Redis
+└── eshoponweb/   .NET SDK 10, in-memory EF Core
 ```
 
-Each project directory contains:
+Each project contains:
 
-- `docker-compose.yml` — worker + data service containers
-- `worker/Dockerfile` — runtime image for the stack
-- `CLAUDE.md` — agent guide: standard commands, health endpoint, key files, failure signals. The supervisor copies this into the workspace as `AGENT_GUIDE.md` before signalling `SANDBOX_READY`.
+- `docker-compose.yml` — worker + data services + OpenHands service (profile `agent`)
+- `worker/Dockerfile` — runtime image for harness mode
 
 ---
 
-## Adding a New Stack
+## Quickstart
 
-Tell Claude:
+### Prerequisites
 
-> Add `<name>` as a new project type. Stack: `<runtime + any data services>`. Repo: `<url>`. "Works" means: builds, tests pass, and `<health endpoint>` returns 200. `<any constraints, e.g. no ARM64 image for X — use in-memory alternative>`.
+- Docker Engine 24+ with Compose plugin
+- `jq`
 
-The required files and naming conventions are documented in `CLAUDE.md`.
+### Harness mode (deterministic demo)
+
+```bash
+# builds images, drives supervisor with hardcoded npm workflow
+./examples/run_nerv_example.sh
+```
+
+### Agent mode (OpenHands autonomous)
+
+```bash
+# 1. configure LLM credentials
+cp .example.env .env
+# edit .env: set GROQ_API_KEY (and optionally LLM_MODEL, LLM_BASE_URL)
+
+# 2. run
+./scripts/run_agent.sh job_specs/nerv.json
+```
+
+Results appear in `run_results/<project>/<run-id>/` on the host.
 
 ---
 
 ## Job Spec
 
-Jobs are described as a JSON file passed to `run_job.sh`:
+Same schema for both modes:
 
 ```json
 {
@@ -78,104 +97,164 @@ Jobs are described as a JSON file passed to `run_job.sh`:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `project_type` | yes | Maps to a directory under `projects/` |
-| `repo_url` | yes | HTTPS URL of the git repository to clone |
-| `commit` | no | Branch, tag, or full SHA. Defaults to `main` |
+| `project_type` | yes | Maps to directory under `projects/` |
+| `repo_url` | yes | HTTPS URL of git repository to clone |
+| `commit` | no | Branch, tag, or full SHA. Default: `main` |
 
-There are no `build_command`, `test_command`, or `run_command` fields. The sandbox provides the environment; the AI agent decides the commands.
-
----
-
-## Quickstart
-
-### Prerequisites
-
-- Docker Engine 24+ with the Compose plugin
-- `jq`
-
-```bash
-# Create a job spec for one of the supported project types, then:
-./scripts/run_job.sh /path/to/job.json
-```
-
-See each project's README for stack-specific job specs and quickstart instructions:
-
-- [Nerv stack](projects/nerv/README.md)
-- [Medplum stack](projects/medplum/README.md)
-- [eShopOnWeb stack](projects/eshoponweb/README.md)
-
-### Inspect results
-
-```bash
-# Replace <run-id> with the value printed by run_job.sh
-docker run --rm -v <run-id>-results:/r alpine sh -c 'cat /r/result.json'
-docker run --rm -v <run-id>-results:/r alpine sh -c 'ls /r/logs/'
-```
+No `build_command`, `test_command`, or `run_command` fields. Sandbox provides env; agent decides commands.
 
 ---
 
-## Agent Command Protocol
+## OpenHands Agent Runner
 
-Once the sandbox is ready, the supervisor prints:
+### Config
+
+```bash
+# .example.env — copy to .env and fill in
+LLM_MODEL=groq/llama-3.1-8b-instant
+GROQ_API_KEY=
+LLM_BASE_URL=https://api.groq.com/openai/v1
+```
+
+`run_agent.sh` loads `.env` automatically. `.env` is gitignored; `.example.env` is committed.
+
+### Prompt
+
+Task prompt: `agent/prompts/pipeline_task.txt`. Runner reads file → exports `TASK` → compose substitutes into OpenHands command. Edit prompt to change agent behavior without touching compose files.
+
+### How it works
+
+1. Creates per-run Docker network + volumes
+2. Clones repo into workspace volume (shallow clone)
+3. Starts project's compose with `--profile agent` → launches data services + OpenHands
+4. OpenHands reads workspace, infers stack, runs build/test/start/healthcheck autonomously
+5. OpenHands writes `result.json` to `/sandbox/results/`
+6. Runner waits for OpenHands container to exit, copies results to host, tears down
+
+### OpenHands in compose
+
+Each project's `docker-compose.yml` includes OpenHands as a `profiles: [agent]` service. Default `docker compose up -d` (supervisor/harness path) does NOT start it. Only `run_agent.sh` activates it via `--profile agent`.
+
+### Result schema (agent mode)
+
+```json
+{
+  "status": "success|failure",
+  "build":        { "status": "...", "command": "...", "exit_code": 0,   "logs": "..." },
+  "start_server": { "status": "...", "command": "...",                    "logs": "..." },
+  "tests":        { "status": "...", "command": "...", "passed": 0, "failed": 0, "logs": "..." },
+  "health_check": { "status": "...", "url": "...", "response_code": 200, "logs": "..." },
+  "errors":       [],
+  "duration_seconds": 0
+}
+```
+
+---
+
+## Harness Mode: Agent Command Protocol
+
+Once sandbox ready, supervisor prints:
 
 ```
 SANDBOX_READY run_id=<id> worker=<id>-<project_type>-worker-1
 ```
 
-The AI harness drives the agent by writing commands to the supervisor's stdin:
+Harness writes commands to supervisor stdin:
 
 | Command | Description |
 |---------|-------------|
-| `EXEC <label> <cmd> [args...]` | Runs `<cmd>` inside the worker as `sandboxuser`. Output is streamed and saved to `logs/<label>.log`. Labels `build` and `test` automatically populate `result.json`. |
-| `HEALTHCHECK <url>` | Curls `<url>` and records the HTTP status code. |
-| `DONE` | Signals successful completion; supervisor writes `result.json` and tears down. |
+| `EXEC <label> <cmd>` | Runs in worker as `sandboxuser`. Output → `logs/<label>.log`. Labels `build`/`test` auto-populate `result.json`. |
+| `HEALTHCHECK <url>` | Curls `<url>`, records HTTP status. |
+| `DONE` | Signals success; supervisor writes `result.json` and tears down. |
 
-The supervisor prints `EXIT_CODE <label> <code>` after each `EXEC` so the harness can branch on failures.
+Supervisor prints `EXIT_CODE <label> <code>` after each `EXEC`.
+
+---
+
+## Adding a New Stack
+
+Tell Claude:
+
+> Add `<name>` as new project type. Stack: `<runtime + data services>`. Repo: `<url>`. "Works" means: builds, tests pass, `<health endpoint>` returns 200. `<constraints>`.
+
+Required files and naming conventions documented in `CLAUDE.md`.
 
 ---
 
 ## Clean State
 
-Each run gets its own:
+Each run gets its own resources, all namespaced by `run-id`:
 
 | Resource | Name | Lifecycle |
 |----------|------|-----------|
-| Docker network | `<run-id>` | created before supervisor starts, removed on exit |
-| Workspace volume | `<run-id>-workspace` | created empty, supervisor clones into it |
-| Results volume | `<run-id>-results` | created empty, survives for post-run inspection |
+| Docker network | `<run-id>` | created before run, removed on exit |
+| Workspace volume | `<run-id>-workspace` | created empty, cloned into at start |
+| Results volume | `<run-id>-results` | persists for post-run inspection |
 
-The workspace volume is created empty by `run_job.sh` before the supervisor starts. The supervisor clears it (`find /sandbox/workspace -mindepth 1 -delete`) before cloning as an extra guard against volume reuse.
+Data services use compose-managed volumes, removed by `docker compose down -v`. No shared state between runs.
 
-Data services (Redis, PostgreSQL) use compose-managed volumes that are removed by `docker compose down -v` automatically. **There is no shared state between runs.** All resources are namespaced by `run-id`.
+---
+
+## Results Layout
+
+```
+run_results/
+└── <project_name>/
+    └── <run-id>/
+        ├── result.json
+        ├── supervisor.log      # harness mode only
+        ├── agent_output.log    # agent mode only (OpenHands JSON stream)
+        └── logs/
+            ├── build.log
+            ├── test.log
+            └── ...
+```
+
+`project_name` = last path segment of `repo_url` (`.git` stripped).
+
+Harness mode `result.json` schema:
+
+```json
+{
+  "run_id": "sandbox-1717612345",
+  "status": "success",
+  "build_exit_code": 0,
+  "test_exit_code": 0,
+  "healthcheck_status": 200,
+  "duration_seconds": 63,
+  "steps": [...]
+}
+```
 
 ---
 
 ## Security and Isolation
 
-### Worker container
+### Worker container (harness mode)
 
-- Runs as non-root (`sandboxuser`, UID created in the Dockerfile)
-- `--security-opt no-new-privileges` prevents privilege escalation
-- All Linux capabilities dropped (`cap_drop: ALL`); only `SETUID`/`SETGID` re-added for npm child process spawning
-- No access to the host filesystem beyond the two named volumes (`workspace`, `results`)
-- Isolated on a per-run Docker bridge network
+- Non-root: `sandboxuser` (UID 1001)
+- `--security-opt no-new-privileges`
+- All Linux capabilities dropped
+- Mounts limited to workspace + results volumes
+- Isolated on per-run Docker bridge network
 
-### Data service containers
+### OpenHands container (agent mode)
 
-- All capabilities dropped
-- No persistence beyond the current run
-- Bound to the sandbox network only; not exposed to the host
+- Uses local runtime (no Docker socket — commands run inside OpenHands container)
+- Mounts: workspace + results volumes only
+- On same per-run sandbox network as data services
 
 ### Supervisor container
 
-- Runs with the Docker socket mounted read-only (`/var/run/docker.sock:ro`)
-- The Docker socket is the primary trust boundary. In production, replace with a rootless Docker daemon, Docker-in-Docker sidecar, or a scoped container runtime API (e.g. containerd).
-- Only the single project directory (`projects/<project_type>/`) is mounted read-only as `/sandbox/project` — the supervisor cannot access other project stacks
+- Docker socket mounted read-only (`/var/run/docker.sock:ro`) — required to manage worker stack
+- Only `projects/<project_type>/` mounted read-only; cannot access other stacks
+- Production hardening: replace socket with rootless Docker or scoped container runtime API
 
 ### Network
 
-- Each run uses a dedicated Docker bridge network; containers in one run cannot reach another run's containers
-- Outbound internet access from the worker is unrestricted by default (required for package restore — `npm install`, `dotnet restore`, etc.). For higher-security deployments, route through a caching proxy (e.g. Verdaccio, a NuGet feed) or add an egress firewall rule.
+- Dedicated bridge network per run; runs are isolated from each other
+- Worker has unrestricted outbound internet (required for `npm install`, `dotnet restore`, etc.)
+- For higher security: route through caching proxy (Verdaccio, NuGet feed) + egress firewall
 
 ---
 
@@ -184,115 +263,48 @@ Data services (Redis, PostgreSQL) use compose-managed volumes that are removed b
 | Container | Memory | CPU |
 |-----------|--------|-----|
 | Supervisor | 256 MB | 0.5 |
-| Worker (per stack) | see project README | see project README |
+| Worker | see project README | see project README |
+| OpenHands | no limit set (inherits host) | no limit set |
 
-**What happens when limits are hit:**
-
-- **Worker OOM** — Docker kills the container (exit 137). The supervisor writes `result.json` with `"status": "failure"`. Treat exit 137 as an OOM signal.
-- **CPU throttle** — Worker is slowed but not killed. Harness timeouts may fire.
-
-Stack-specific limits are documented in each project's README.
+**OOM**: Docker kills container, exit code 137. Supervisor writes `"status": "failure"`.  
+**CPU throttle**: worker slows, harness timeouts may fire.
 
 ---
 
-## Timeouts
+## Timeouts (harness mode)
 
-Three timeout thresholds prevent jobs from running indefinitely.
+| Variable | Default | Controls |
+|----------|---------|----------|
+| `TIMEOUT_TOTAL` | `1800` | Whole-job wall-clock limit. Exceeded → supervisor sends SIGUSR1, writes `"status": "timeout"`, tears down. |
+| `TIMEOUT_EXEC` | `600` | Per-EXEC-step limit. Timed-out step exits `124`; command loop continues. |
+| `TIMEOUT_STACK_HEALTHY` | `120` | Max wait for worker Docker healthcheck. |
 
-| Variable | Default | What it controls |
-|----------|---------|-----------------|
-| `TIMEOUT_TOTAL` | `1800` | Whole-job wall-clock limit (seconds). When exceeded, the supervisor sends itself SIGUSR1, calls `finish("timeout")`, and tears down the stack. |
-| `TIMEOUT_EXEC` | `600` | Per-`EXEC`-step limit (seconds). Wraps `docker exec` with `timeout(1)`. A timed-out step exits with code `124`; the command loop continues so the agent can decide what to do. |
-| `TIMEOUT_STACK_HEALTHY` | `120` | How long to wait for the worker container to pass its Docker healthcheck before giving up. |
-
-All three appear in `result.json` implicitly: a timed-out job has `"status": "timeout"` and step entries with `"exit_code": 124`.
-
-### Configuring timeouts
-
-Set the variables in a `.env` file in the repo root before running `run_job.sh`:
+Configure in `.env`:
 
 ```bash
-# .env
-TIMEOUT_TOTAL=3600       # allow up to 1 hour for slow builds
-TIMEOUT_EXEC=900         # allow 15 minutes per step
-TIMEOUT_STACK_HEALTHY=60 # fail fast if the worker doesn't start
+TIMEOUT_TOTAL=3600
+TIMEOUT_EXEC=900
+TIMEOUT_STACK_HEALTHY=60
 ```
 
-`run_job.sh` sources `.env` automatically if the file exists. Variables can also be exported in the calling shell — shell env takes precedence over `.env`.
+`run_job.sh` sources `.env` automatically.
 
 ---
 
 ## Build Performance
 
-### Layer caching
+- Worker images built once, reused across runs. Source never baked into image — arrives via workspace volume at runtime.
+- Shallow clone (`--depth=1`) for fast workspace setup.
+- Layer caching: subsequent runs with same `project_type` reuse cached image.
 
-Worker images are built once and reused across runs. Project source is never baked into the image — it arrives at runtime via the workspace volume. Some stacks use multi-stage builds to separate toolchain installation from the runtime image (e.g. the Nerv worker pre-installs the TypeScript toolchain in a separate stage to keep the final layer lean).
-
-Because `run_job.sh` pre-builds the worker image before the supervisor starts, subsequent runs with the same `project_type` reuse the cached image entirely.
-
-### Improvement options at scale
-
-- **Package cache volume** — mount a persistent cache volume into the worker (e.g. `~/.npm` for Node, `~/.nuget/packages` for .NET) to avoid re-downloading packages across runs.
-- **Warm worker pools** — pre-start idle workers with the repo pre-cloned and dependencies pre-installed; jobs skip straight to build/test.
-- **MicroVM isolation** — replace Docker containers with Firecracker microVMs (e.g. via Kata Containers) for stronger isolation with comparable startup times (~125ms per VM).
-- **Registry mirror** — route `npm install` through a local Verdaccio instance to eliminate external network latency.
-
-Stack-specific timings are documented in each project's README.
-
----
-
-## Results Layout
-
-Every run produces:
-
-```
-/sandbox/results/          # in-container path (results volume)
-├── result.json
-└── logs/
-    ├── install.log
-    ├── build.log
-    ├── test.log
-    └── run.log        # if the agent starts the service
-```
-
-Results are copied to the host at the end of each run:
-
-```
-run_results/
-└── <project_type>/
-    └── <run-id>/
-        ├── result.json
-        ├── supervisor.log
-        └── logs/
-```
-
-`result.json` schema:
-
-```json
-{
-  "status": "success",
-  "build_exit_code": 0,
-  "test_exit_code": 0,
-  "healthcheck_status": 200,
-  "duration_seconds": 63,
-  "run_id": "sandbox-1717612345"
-}
-```
-
-The results volume persists after the run. Clean up when done:
-
-```bash
-docker volume rm <run-id>-results <run-id>-workspace
-```
+Scale improvements: persistent package cache volume (`~/.npm`, `~/.nuget/packages`), warm worker pools, registry mirror (Verdaccio), microVM isolation (Firecracker/Kata).
 
 ---
 
 ## Agent-Oriented Design
 
-This sandbox is **not a CI pipeline**. It provides an isolated environment with the right runtime, a cloned workspace, and a way to execute arbitrary commands. The AI agent decides what to install, build, test, and run by reading the project's own manifests (`package.json`, `Dockerfile`, etc.).
+Sandbox is **not a CI pipeline**. Provides isolated env + runtime + cloned workspace + arbitrary command execution. Agent (harness script or OpenHands LLM) decides what to install, build, test, and run by reading project manifests.
 
-Any script that infers build/test/run commands and executes them is a **harness simulation** — a demonstration of what an agent would do. These live in `examples/` and are not mounted into the sandbox.
+Scripts in `examples/` are **harness simulations** — deterministic demonstrations of what an agent would do. They are not mounted into the sandbox.
 
-Each project ships a `CLAUDE.md` describing its standard workflow (install → build → test → start), health endpoint, key files, and failure signals. The supervisor copies it into the workspace as `AGENT_GUIDE.md` so a real agent finds it during normal workspace inspection alongside `package.json` and other manifests.
-
-General agent guidance (workspace inspection strategy, command protocol, failure interpretation) lives in the top-level `CLAUDE.md`.
+Scripts in `examples/` show what an agent would do for a known stack. OpenHands reads repo manifests directly from `/workspace` to figure out the same autonomously.

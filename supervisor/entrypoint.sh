@@ -83,13 +83,6 @@ mkdir -p "$RESULTS/logs"
 # --- Clone repo ---
 clone_repo "$REPO_URL" "$COMMIT" "$WORKSPACE"
 
-# --- Copy project agent guide into workspace so agent finds it ---
-if [[ -f "$PROJECT_DIR/CLAUDE.md" ]]; then
-  cp "$PROJECT_DIR/CLAUDE.md" "$WORKSPACE/AGENT_GUIDE.md"
-  chown 1001:1001 "$WORKSPACE/AGENT_GUIDE.md"
-  log "Copied CLAUDE.md → /workspace/AGENT_GUIDE.md"
-fi
-
 # --- Start worker stack ---
 start_stack "$COMPOSE_FILE" "$PROJECT_TYPE"
 

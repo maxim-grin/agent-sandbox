@@ -207,18 +207,11 @@ The single remaining failure is in the upstream medplum repository and is not fi
 
 ## Sandbox Design Findings (2026-06-07)
 
-### Per-project agent guide (`CLAUDE.md`)
+### Per-project agent guide (`CLAUDE.md`) — tried and removed
 
-Leaving the agent to infer the full workflow from raw manifests (`package.json`, `*.csproj`, etc.) works, but wastes early tool calls on discovery that is the same every run for a known project. A `CLAUDE.md` placed in each project directory and copied into the workspace as `AGENT_GUIDE.md` before `SANDBOX_READY` fires lets the agent skip re-inference and go straight to execution.
+Leaving the agent to infer the full workflow from raw manifests works, but wastes early tool calls on discovery that is identical every run for a known project. Per-project `CLAUDE.md` files were added to each `projects/<type>/` directory and copied into the workspace as `AGENT_GUIDE.md` before `SANDBOX_READY`.
 
-Minimum content that pays off:
-
-- Standard command sequence (install → build → test → start)
-- Health endpoint URL and expected status
-- Which files are worth inspecting
-- Failure code meanings (e.g. exit 137 = OOM)
-
-The file is project-specific but follows a consistent schema across all stacks, so a real agent can treat it as a structured hint rather than free-form docs.
+This approach was later removed (2026-06-09) when the architecture shifted to OpenHands as the agent runtime. OpenHands reads repo manifests directly — the extra hint file adds overhead without changing what a capable LLM agent can infer. The harness example scripts already document the expected command sequence; a separate guide file duplicated that knowledge.
 
 ### Single-project mount
 
@@ -259,6 +252,43 @@ Arguments for giving agents history were considered and rejected:
 
 **Exception worth considering:** a small structured `project_notes.json` passed at job start — recording *persistent* patterns that don't change between commits (e.g. "NuGet restore requires private feed auth", "test suite requires `openssl` in PATH"). This is signal, not history. It has not been implemented yet.
 
-### `run_results/` organised by project type
+### `run_results/` organised by project, then run
 
-Previously all run directories were flat under `run_results/<run-id>/`. Reorganised to `run_results/<project_type>/<run-id>/` so runs for different stacks don't mix. The change is in `scripts/run_job.sh` and all three example scripts (each got a `PROJECT_TYPE` variable that feeds the path).
+Previously all run directories were flat under `run_results/<run-id>/`. Reorganised to `run_results/<project>/<run-id>/` so runs for different repos don't mix.
+
+For harness mode (`run_job.sh`), `project` = `project_type` from the job spec.  
+For agent mode (`run_agent.sh`), `project` = last path segment of `repo_url` (`.git` stripped) — there is no `project_type` concept when OpenHands evaluates arbitrary repos.
+
+---
+
+## OpenHands Agent Mode (2026-06-09)
+
+### Motivation
+
+The harness simulation scripts (`examples/run_*_example.sh`) hard-code the command sequence for each known repo. That works as a demo but defeats the point of an AI agent sandbox — a real agent should figure out how to build and test an unknown repo without being told the steps.
+
+OpenHands (headless LLM agent in a Docker container) replaces the scripted harness for the agent runner path. The agent reads workspace manifests, decides commands, executes the full pipeline, and writes a structured JSON report.
+
+### No separate OpenHands compose file
+
+First instinct was to add `projects/openhands/docker-compose.yml`. Rejected: OpenHands is not a project-specific worker stack — it needs to run alongside whichever project's data services (Redis, PostgreSQL, etc.) are required by the repo under test.
+
+Solution: add OpenHands as a `profiles: [agent]` service inside each existing project's `docker-compose.yml`. Harness runs (`docker compose up -d`, no profile) don't start it. Agent runs (`--profile agent`) start data services + OpenHands together. One compose file per project, two modes.
+
+### Prompt as file, not hardcoded YAML
+
+Embedding the task prompt directly in `command:` in the compose YAML makes it hard to iterate on prompt wording without touching infrastructure files. Prompt lives in `agent/prompts/pipeline_task.txt`. Runner reads it, exports as `TASK`, compose substitutes `${TASK}` into the OpenHands command. Change prompt → edit one file, no YAML diff.
+
+### No Docker socket for OpenHands
+
+OpenHands supports a Docker runtime (spawns a container for code execution) and a local runtime (runs commands inside the OpenHands container). The local runtime requires no Docker socket mount — OpenHands executes directly inside its own container. This is simpler and reduces the attack surface compared to giving OpenHands socket access.
+
+Trade-off: local runtime means the runtime environment is whatever is in the `openhands/openhands:latest` image. OpenHands can install tools dynamically (via `apt`, `npm`, etc.) but cold installs add latency on each run.
+
+### Result written by the agent, not the supervisor
+
+In harness mode, the supervisor writes `result.json` by tracking `EXIT_CODE` responses and `HEALTHCHECK_STATUS`. In agent mode, there is no supervisor — OpenHands writes `result.json` directly to `/sandbox/results/` as the final step of its task. The prompt specifies the exact schema. The runner treats an absent or malformed `result.json` as a failure.
+
+### `project_name` vs `project_type` in results path
+
+Harness mode uses `project_type` (from job spec: `nerv`, `medplum`, `eshoponweb`). Agent mode derives `project_name` from `repo_url` (last segment, `.git` stripped). For `https://github.com/org/nerv.git` → `nerv`. This keeps result paths consistent with the actual repo being tested, regardless of which agent ran it.
