@@ -10,11 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Non-root user for all agent-driven commands (fixed UID/GID so the supervisor
+# Non-root user for all agent-driven commands (fixed UID/GID so the runner
 # can chown the cloned workspace without needing sandboxuser to exist there).
 RUN groupadd -g 1001 sandboxgroup && useradd -u 1001 -g sandboxgroup -m sandboxuser
 
-# /workspace is mounted at runtime from the workspace volume (cloned by supervisor)
+# /workspace is mounted at runtime from the workspace volume (cloned by run_agent.sh)
 RUN mkdir -p /workspace /sandbox/results/logs \
     && chown -R sandboxuser:sandboxgroup /workspace /sandbox
 

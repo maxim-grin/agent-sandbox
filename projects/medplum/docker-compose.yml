@@ -1,8 +1,8 @@
 # Medplum stack: Node/TypeScript worker + PostgreSQL + Redis.
 #
 # All Docker resources (network, workspace volume, results volume) are created
-# by run_job.sh before this compose file is invoked, so they are declared
-# external here. The supervisor passes RUN_ID, SANDBOX_NETWORK,
+# by run_agent.sh before this compose file is invoked, so they are declared
+# external here. run_agent.sh passes RUN_ID, SANDBOX_NETWORK,
 # WORKSPACE_VOLUME, RESULTS_VOLUME, and WORKER_IMAGE as environment variables.
 
 services:
@@ -135,8 +135,7 @@ services:
       start_period: 5s
 
   openhands:
-    image: openhands/openhands:latest
-    profiles: [agent]
+    image: ghcr.io/all-hands-ai/openhands:latest
     container_name: "${RUN_ID}-medplum-openhands"
     environment:
       - LLM_MODEL=${LLM_MODEL}

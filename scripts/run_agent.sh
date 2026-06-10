@@ -31,6 +31,7 @@ PROJECT_NAME="$(basename "$REPO_URL" .git)"
 
 RUN_ID="sandbox-$(date +%s)"
 NETWORK_NAME="$RUN_ID"
+LLM_NETWORK="${RUN_ID}-llm"
 RESULTS_VOLUME="${RUN_ID}-results"
 WORKSPACE_VOLUME="${RUN_ID}-workspace"
 HOST_RESULTS="$REPO_ROOT/run_results/$PROJECT_NAME/$RUN_ID"
@@ -55,17 +56,18 @@ cleanup() {
     alpine sh -c 'cp -r /r/. /out/ 2>/dev/null || true' 2>/dev/null || true
 
   echo "[run_agent] Tearing down compose..."
-  RUN_ID="$RUN_ID" SANDBOX_NETWORK="$NETWORK_NAME" RESULTS_VOLUME="$RESULTS_VOLUME" \
-    WORKSPACE_VOLUME="$WORKSPACE_VOLUME" WORKER_IMAGE="" TASK="$TASK" \
+  RUN_ID="$RUN_ID" SANDBOX_NETWORK="$NETWORK_NAME" LLM_NETWORK="${LLM_NETWORK:-}" \
+    RESULTS_VOLUME="$RESULTS_VOLUME" WORKSPACE_VOLUME="$WORKSPACE_VOLUME" WORKER_IMAGE="" \
+    TASK="${TASK:-}" RUNNER_SCRIPT="${RUNNER_SCRIPT:-/dev/null}" \
     LLM_MODEL="${LLM_MODEL:-}" GROQ_API_KEY="${GROQ_API_KEY:-}" LLM_BASE_URL="${LLM_BASE_URL:-}" \
     docker compose \
       -p "${RUN_ID}-${PROJECT_TYPE}" \
       -f "$COMPOSE_FILE" \
-      --profile agent \
       down -v 2>/dev/null || true
 
-  echo "[run_agent] Cleaning up network and volumes: $NETWORK_NAME"
+  echo "[run_agent] Cleaning up networks and volumes: $NETWORK_NAME, $LLM_NETWORK"
   docker network rm "$NETWORK_NAME" 2>/dev/null || true
+  docker network rm "${LLM_NETWORK:-}" 2>/dev/null || true
   docker volume rm "$RESULTS_VOLUME" "$WORKSPACE_VOLUME" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -78,8 +80,9 @@ echo "[run_agent] Commit:       $COMMIT"
 echo "[run_agent] Job spec:     $JOB_SPEC"
 
 # --- Docker resources ---
-echo "[run_agent] Creating network: $NETWORK_NAME"
+echo "[run_agent] Creating networks: $NETWORK_NAME, $LLM_NETWORK"
 docker network create "$NETWORK_NAME"
+docker network create "$LLM_NETWORK"
 
 echo "[run_agent] Creating volumes: $RESULTS_VOLUME, $WORKSPACE_VOLUME"
 docker volume create "$RESULTS_VOLUME"
@@ -103,23 +106,32 @@ docker run --rm \
 # --- Load task prompt ---
 TASK="$(cat "$PROMPT_FILE")"
 export TASK
+export RUNNER_SCRIPT="$REPO_ROOT/scripts/openhands_runner.py"
 
-# --- Start compose with agent profile ---
-echo "[run_agent] Starting stack with agent profile..."
-RUN_ID="$RUN_ID" SANDBOX_NETWORK="$NETWORK_NAME" RESULTS_VOLUME="$RESULTS_VOLUME" \
-  WORKSPACE_VOLUME="$WORKSPACE_VOLUME" WORKER_IMAGE="ai-sandbox-${PROJECT_TYPE}-worker" \
-  TASK="$TASK" \
+# Copy prompt into results volume so OpenHands can read it via -f (avoids
+# multi-line string quoting issues when passing through docker compose env).
+echo "[run_agent] Copying prompt to results volume..."
+docker run --rm \
+  -v "${RESULTS_VOLUME}:/r" \
+  -v "${PROMPT_FILE}:/prompt.txt:ro" \
+  alpine cp /prompt.txt /r/prompt.txt
+
+# --- Start compose ---
+echo "[run_agent] Starting stack..."
+RUN_ID="$RUN_ID" SANDBOX_NETWORK="$NETWORK_NAME" LLM_NETWORK="$LLM_NETWORK" \
+  RESULTS_VOLUME="$RESULTS_VOLUME" WORKSPACE_VOLUME="$WORKSPACE_VOLUME" \
+  WORKER_IMAGE="ai-sandbox-${PROJECT_TYPE}-worker" \
+  TASK="$TASK" RUNNER_SCRIPT="$RUNNER_SCRIPT" \
   LLM_MODEL="${LLM_MODEL:-}" GROQ_API_KEY="${GROQ_API_KEY:-}" LLM_BASE_URL="${LLM_BASE_URL:-}" \
   docker compose \
     -p "${RUN_ID}-${PROJECT_TYPE}" \
     -f "$COMPOSE_FILE" \
-    --profile agent \
     up -d
 
 # --- Wait for OpenHands to finish ---
 echo "[run_agent] Waiting for OpenHands container: $OPENHANDS_CONTAINER"
 EXIT_CODE=0
-docker wait "$OPENHANDS_CONTAINER" || EXIT_CODE=$?
+timeout "${TIMEOUT_TOTAL:-1800}" docker wait "$OPENHANDS_CONTAINER" || EXIT_CODE=$?
 
 echo "[run_agent] OpenHands exited with code: $EXIT_CODE"
 
@@ -133,7 +145,7 @@ cleanup
 
 if [[ -f "$RESULT_JSON" ]]; then
   echo "[run_agent] Result summary:"
-  jq '{status, build: .build.status, tests: .tests.status, health_check: .health_check.status, duration_seconds}' "$RESULT_JSON" 2>/dev/null || cat "$RESULT_JSON"
+  jq '{status, build: .build.status, tests: .tests.status, health_check: .health_check.status, duration_seconds, session_cost, session_tokens}' "$RESULT_JSON" 2>/dev/null || cat "$RESULT_JSON"
 else
   echo "[run_agent] No result.json found in $HOST_RESULTS" >&2
 fi

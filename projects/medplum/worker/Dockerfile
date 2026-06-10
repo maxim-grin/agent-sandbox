@@ -9,11 +9,11 @@ FROM node:22-alpine
 
 RUN apk add --no-cache git curl openssl
 
-# Non-root user for all agent-driven commands (fixed UID/GID so the supervisor
+# Non-root user for all agent-driven commands (fixed UID/GID so the runner
 # can chown the cloned workspace without needing sandboxuser to exist there).
 RUN addgroup -S -g 1001 sandboxgroup && adduser -S -u 1001 -G sandboxgroup sandboxuser
 
-# /workspace is mounted at runtime from the workspace volume (cloned by supervisor)
+# /workspace is mounted at runtime from the workspace volume (cloned by run_agent.sh)
 RUN mkdir -p /workspace /sandbox/results/logs \
     && chown -R sandboxuser:sandboxgroup /workspace /sandbox
 
