@@ -15,7 +15,9 @@ RUN apk add --no-cache git curl openssh
 
 # Non-root user for all agent-driven commands (fixed UID/GID so the runner
 # can chown the cloned workspace without needing sandboxuser to exist there).
-RUN addgroup -S -g 1001 sandboxgroup && adduser -S -u 1001 -G sandboxgroup sandboxuser
+RUN addgroup -S -g 1001 sandboxgroup \
+    && adduser -S -u 1001 -G sandboxgroup -s /bin/sh sandboxuser \
+    && passwd -d sandboxuser
 
 # Copy globally installed tools from the toolchain stage
 COPY --from=toolchain /usr/local/lib/node_modules /usr/local/lib/node_modules
@@ -31,8 +33,8 @@ RUN mkdir -p /workspace /sandbox/results/logs \
 RUN ssh-keygen -A
 
 RUN mkdir -p /home/sandboxuser/.ssh \
-    && chown sandboxuser:sandboxgroup /home/sandboxuser/.ssh \
-    && chmod 700 /home/sandboxuser/.ssh
+    && chmod 755 /home/sandboxuser/.ssh \
+    && printf 'StrictModes no\nKexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,diffie-hellman-group14-sha256\n' >> /etc/ssh/sshd_config
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

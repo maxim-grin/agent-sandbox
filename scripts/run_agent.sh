@@ -122,7 +122,7 @@ echo "[run_agent] SSH key generated: $SSH_KEY_DIR/key"
 
 # --- API key secret file (hides key from docker inspect / /proc/1/environ) ---
 API_KEY_FILE="$(mktemp)"
-chmod 600 "$API_KEY_FILE"
+chmod 644 "$API_KEY_FILE"
 printf '%s' "${GROQ_API_KEY:-}" > "$API_KEY_FILE"
 export GROQ_API_KEY_FILE="$API_KEY_FILE"
 echo "[run_agent] API key written to secret file: $API_KEY_FILE"

@@ -31,6 +31,10 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - SYS_CHROOT
     healthcheck:
       test: ["CMD", "node", "--version"]
       interval: 5s
