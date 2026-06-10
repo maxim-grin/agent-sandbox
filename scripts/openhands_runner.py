@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenHands SDK runner — executes agent headlessly, augments result.json with token/cost."""
+"""OpenHands SDK runner — executes agent via SSHRuntime, augments result.json with token/cost."""
 import asyncio
 import json
 import os
@@ -9,13 +9,60 @@ from pathlib import Path
 RESULTS_PATH = Path("/sandbox/results/result.json")
 
 
+class SSHRuntime:
+    """Thin runtime: executes agent actions over SSH into the worker container."""
+
+    def __init__(self, ssh_host: str, ssh_user: str, ssh_key_path: str):
+        import paramiko
+        self._client = paramiko.SSHClient()
+        self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self._client.connect(ssh_host, username=ssh_user, key_filename=ssh_key_path)
+        self._sftp = self._client.open_sftp()
+
+    async def run(self, action):
+        from openhands.events.action import BashAction, FileReadAction, FileWriteAction
+        from openhands.events.observation import (
+            BashObservation,
+            FileReadObservation,
+            FileWriteObservation,
+        )
+
+        if isinstance(action, BashAction):
+            _, stdout, stderr = self._client.exec_command(
+                action.command, get_pty=True, timeout=300
+            )
+            output = stdout.read().decode() + stderr.read().decode()
+            return BashObservation(content=output)
+
+        if isinstance(action, FileReadAction):
+            with self._sftp.open(action.path) as f:
+                return FileReadObservation(content=f.read().decode(), path=action.path)
+
+        if isinstance(action, FileWriteAction):
+            with self._sftp.open(action.path, "w") as f:
+                f.write(action.content)
+            return FileWriteObservation(content="", path=action.path)
+
+        raise NotImplementedError(f"Unhandled action: {type(action)}")
+
+    async def close(self):
+        self._sftp.close()
+        self._client.close()
+
+
 async def run_agent(task: str) -> dict:
     from openhands.core.config import AppConfig, LLMConfig
-    from openhands.core.main import create_runtime, run_controller
+    from openhands.core.main import run_controller
+
+    secret_file = Path("/run/secrets/groq_api_key")
+    if secret_file.exists():
+        api_key = secret_file.read_text().strip()
+    else:
+        api_key = os.environ.get("LLM_API_KEY") or os.environ.get("GROQ_API_KEY") or ""
 
     llm_config = LLMConfig(
         model=os.environ["LLM_MODEL"],
-        api_key=os.environ.get("LLM_API_KEY") or os.environ.get("GROQ_API_KEY") or "",
+        api_key=api_key,
         base_url=os.environ.get("LLM_BASE_URL") or None,
     )
 
@@ -26,7 +73,11 @@ async def run_agent(task: str) -> dict:
         llm=llm_config,
     )
 
-    runtime = await create_runtime(config)
+    ssh_host = os.environ.get("SSH_HOST", "worker")
+    ssh_user = os.environ.get("SSH_USER", "sandboxuser")
+    ssh_key = os.environ.get("SSH_KEY", "/run/secrets/ssh_key")
+
+    runtime = SSHRuntime(ssh_host, ssh_user, ssh_key)
 
     try:
         state = await run_controller(

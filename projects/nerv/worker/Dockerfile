@@ -11,7 +11,7 @@ RUN npm install -g typescript ts-node ts-node-dev 2>/dev/null
 # Stage 2: runtime image (no build artifacts, lean layer)
 FROM node:20-alpine AS runtime
 
-RUN apk add --no-cache git curl
+RUN apk add --no-cache git curl openssh
 
 # Non-root user for all agent-driven commands (fixed UID/GID so the runner
 # can chown the cloned workspace without needing sandboxuser to exist there).
@@ -27,12 +27,19 @@ COPY --from=toolchain /usr/local/bin/ts-node-dev  /usr/local/bin/ts-node-dev
 RUN mkdir -p /workspace /sandbox/results/logs \
     && chown -R sandboxuser:sandboxgroup /workspace /sandbox
 
-WORKDIR /workspace
+# SSH host keys stable across container restarts within a run
+RUN ssh-keygen -A
 
-USER sandboxuser
+RUN mkdir -p /home/sandboxuser/.ssh \
+    && chown sandboxuser:sandboxgroup /home/sandboxuser/.ssh \
+    && chmod 700 /home/sandboxuser/.ssh
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+WORKDIR /workspace
 
 HEALTHCHECK --interval=5s --timeout=3s --retries=3 \
   CMD node --version
 
-# Keeps the container alive for docker exec commands from the agent
-CMD ["sleep", "infinity"]
+CMD ["/usr/local/bin/docker-entrypoint.sh"]

@@ -59,7 +59,8 @@ cleanup() {
   RUN_ID="$RUN_ID" SANDBOX_NETWORK="$NETWORK_NAME" LLM_NETWORK="${LLM_NETWORK:-}" \
     RESULTS_VOLUME="$RESULTS_VOLUME" WORKSPACE_VOLUME="$WORKSPACE_VOLUME" WORKER_IMAGE="" \
     TASK="${TASK:-}" RUNNER_SCRIPT="${RUNNER_SCRIPT:-/dev/null}" \
-    LLM_MODEL="${LLM_MODEL:-}" GROQ_API_KEY="${GROQ_API_KEY:-}" LLM_BASE_URL="${LLM_BASE_URL:-}" \
+    SSH_KEY_PATH="${SSH_KEY_PATH:-/dev/null}" AGENT_SSH_PUBKEY="${AGENT_SSH_PUBKEY:-}" \
+    LLM_MODEL="${LLM_MODEL:-}" GROQ_API_KEY_FILE="${API_KEY_FILE:-/dev/null}" LLM_BASE_URL="${LLM_BASE_URL:-}" \
     docker compose \
       -p "${RUN_ID}-${PROJECT_TYPE}" \
       -f "$COMPOSE_FILE" \
@@ -69,6 +70,13 @@ cleanup() {
   docker network rm "$NETWORK_NAME" 2>/dev/null || true
   docker network rm "${LLM_NETWORK:-}" 2>/dev/null || true
   docker volume rm "$RESULTS_VOLUME" "$WORKSPACE_VOLUME" 2>/dev/null || true
+
+  if [[ -n "${SSH_KEY_DIR:-}" ]]; then
+    rm -rf "$SSH_KEY_DIR"
+  fi
+  if [[ -n "${API_KEY_FILE:-}" ]]; then
+    rm -f "$API_KEY_FILE"
+  fi
 }
 trap cleanup EXIT
 
@@ -103,6 +111,22 @@ docker run --rm \
   -v "${WORKSPACE_VOLUME}:/workspace" \
   alpine chown -R 1001:1001 /workspace
 
+# --- SSH key pair (ephemeral, per-run) ---
+SSH_KEY_DIR="$(mktemp -d)"
+ssh-keygen -t ed25519 -f "$SSH_KEY_DIR/key" -N "" -q
+chmod 644 "$SSH_KEY_DIR/key"
+AGENT_SSH_PUBKEY="$(cat "$SSH_KEY_DIR/key.pub")"
+export AGENT_SSH_PUBKEY
+export SSH_KEY_PATH="$SSH_KEY_DIR/key"
+echo "[run_agent] SSH key generated: $SSH_KEY_DIR/key"
+
+# --- API key secret file (hides key from docker inspect / /proc/1/environ) ---
+API_KEY_FILE="$(mktemp)"
+chmod 600 "$API_KEY_FILE"
+printf '%s' "${GROQ_API_KEY:-}" > "$API_KEY_FILE"
+export GROQ_API_KEY_FILE="$API_KEY_FILE"
+echo "[run_agent] API key written to secret file: $API_KEY_FILE"
+
 # --- Load task prompt ---
 TASK="$(cat "$PROMPT_FILE")"
 export TASK
@@ -122,7 +146,8 @@ RUN_ID="$RUN_ID" SANDBOX_NETWORK="$NETWORK_NAME" LLM_NETWORK="$LLM_NETWORK" \
   RESULTS_VOLUME="$RESULTS_VOLUME" WORKSPACE_VOLUME="$WORKSPACE_VOLUME" \
   WORKER_IMAGE="ai-sandbox-${PROJECT_TYPE}-worker" \
   TASK="$TASK" RUNNER_SCRIPT="$RUNNER_SCRIPT" \
-  LLM_MODEL="${LLM_MODEL:-}" GROQ_API_KEY="${GROQ_API_KEY:-}" LLM_BASE_URL="${LLM_BASE_URL:-}" \
+  SSH_KEY_PATH="$SSH_KEY_PATH" AGENT_SSH_PUBKEY="$AGENT_SSH_PUBKEY" \
+  LLM_MODEL="${LLM_MODEL:-}" GROQ_API_KEY_FILE="$GROQ_API_KEY_FILE" LLM_BASE_URL="${LLM_BASE_URL:-}" \
   docker compose \
     -p "${RUN_ID}-${PROJECT_TYPE}" \
     -f "$COMPOSE_FILE" \
