@@ -1,34 +1,40 @@
-Analyze this Node.js/TypeScript repository and run the full pipeline.
+Run the full pipeline for this Node.js/TypeScript repo. Token budget is tight — minimize steps and output.
 
 ## Environment
 
 - Runtime: Node 20
-- Redis available at redis://redis:6379 (REDIS_URL env var is already set)
+- Redis: redis://redis:6379 (REDIS_URL already set)
 - Workspace: /workspace
 - Results: /sandbox/results/result.json
 
-## Pipeline
+## Rules (CRITICAL — model has 6000 token/min limit)
 
-1. Install dependencies (npm install)
-2. Build (npm run build)
-3. Run tests (npm test)
-4. Start server in background
-5. Probe health endpoint
+- Run as few commands as possible. Chain with && where feasible.
+- Truncate ALL command output: pipe through `| tail -20` or `2>&1 | tail -20`.
+- Never read source files. Read only package.json (once).
+- Do not explain steps. Act immediately.
+- In result.json, cap every "logs" field at 300 characters.
 
-Read package.json to discover the exact build, test, and start scripts. Read README or source to find the health check route and port.
+## Pipeline (execute in order)
+
+1. Read /workspace/package.json — get build, test, start scripts and main entry point.
+2. `npm install 2>&1 | tail -5`
+3. `npm run build 2>&1 | tail -20` (skip if no build script)
+4. `npm test 2>&1 | tail -20`
+5. Start server in background, wait 3s, probe health endpoint with curl.
 
 ## Result
 
-Write structured JSON to /sandbox/results/result.json:
+Write to /sandbox/results/result.json:
 
 {
   "status": "success or failure",
-  "build":        { "status": "...", "command": "...", "exit_code": 0,   "logs": "..." },
-  "start_server": { "status": "...", "command": "...",                    "logs": "..." },
-  "tests":        { "status": "...", "command": "...", "passed": 0, "failed": 0, "logs": "..." },
-  "health_check": { "status": "...", "url": "...", "response_code": 200, "logs": "..." },
+  "build":        { "status": "...", "command": "...", "exit_code": 0,   "logs": "...(max 300 chars)" },
+  "start_server": { "status": "...", "command": "...",                   "logs": "...(max 300 chars)" },
+  "tests":        { "status": "...", "command": "...", "passed": 0, "failed": 0, "logs": "...(max 300 chars)" },
+  "health_check": { "status": "...", "url": "...", "response_code": 200, "logs": "...(max 300 chars)" },
   "errors":       [],
   "duration_seconds": 0
 }
 
-Do not ask for confirmation. Run autonomously.
+Do not ask for confirmation. Run autonomously. Be brief.

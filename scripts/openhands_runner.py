@@ -279,16 +279,31 @@ async def run_agent(task: str) -> dict:
 
     await runtime.connect()
 
+    # Leave 60s for cleanup before TIMEOUT_TOTAL kills the container.
+    agent_timeout = int(os.environ.get("TIMEOUT_TOTAL", 1800)) - 60
+
     try:
-        state = await run_controller(
-            config=config,
-            initial_user_action=MessageAction(content=task),
-            sid=sid,
-            runtime=runtime,
-            headless_mode=True,
+        state = await asyncio.wait_for(
+            run_controller(
+                config=config,
+                initial_user_action=MessageAction(content=task),
+                sid=sid,
+                runtime=runtime,
+                headless_mode=True,
+            ),
+            timeout=agent_timeout,
         )
     finally:
         runtime.close()
+
+    # Detect RATE_LIMITED terminal state — run_controller returns normally but
+    # the agent never completed its task.
+    try:
+        from openhands.controller.state.state import AgentState
+        if state is not None and state.agent_state == AgentState.RATE_LIMITED:
+            raise RuntimeError("rate_limit_exceeded: agent reached RATE_LIMITED state")
+    except ImportError:
+        pass
 
     session_tokens: dict = {}
     session_cost = 0.0
@@ -306,39 +321,72 @@ async def run_agent(task: str) -> dict:
     return {"session_tokens": session_tokens, "session_cost": session_cost}
 
 
+def _write_result(data: dict) -> None:
+    RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RESULTS_PATH.write_text(json.dumps(data, indent=2))
+    print(f"[runner] Result written: {RESULTS_PATH} status={data.get('status')}", flush=True)
+
+
 def main():
+    import signal
+
     task = os.environ.get("TASK", "").strip()
     if not task:
         print("[runner] ERROR: TASK env var not set", file=sys.stderr)
         sys.exit(1)
 
+    # SIGTERM handler — fires when compose down kills the container.
+    # Writes failure result.json so the run always has structured output.
+    def _on_sigterm(signum, frame):
+        print("[runner] SIGTERM received — writing failure result", file=sys.stderr, flush=True)
+        if not RESULTS_PATH.exists():
+            _write_result({"status": "failure", "errors": ["runner killed by SIGTERM (timeout or external stop)"]})
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     print(f"[runner] Task length: {len(task)} chars", flush=True)
 
     token_info: dict = {"session_tokens": {}, "session_cost": 0.0}
+    agent_exc: BaseException | None = None
     try:
         token_info = asyncio.run(run_agent(task))
         print(f"[runner] Agent done. Cost: ${token_info['session_cost']:.4f}", flush=True)
-    except Exception as exc:
+    except BaseException as exc:
         import traceback
 
+        agent_exc = exc
         print(f"[runner] Agent error: {exc}", file=sys.stderr)
         traceback.print_exc()
 
     if RESULTS_PATH.exists():
         try:
             data = json.loads(RESULTS_PATH.read_text())
-            print(f"[runner] result.json status: {data.get('status')}", flush=True)
         except json.JSONDecodeError as exc:
             print(f"[runner] result.json parse error: {exc}", file=sys.stderr)
             data = {"status": "failure", "errors": [f"result.json parse error: {exc}"]}
     else:
-        print(f"[runner] WARNING: no result.json at {RESULTS_PATH}", file=sys.stderr)
-        data = {"status": "failure", "errors": ["agent did not write result.json"]}
+        error_msg = str(agent_exc) if agent_exc else "agent did not write result.json"
+        is_rate_limit = agent_exc is not None and (
+            "rate_limit_exceeded" in str(agent_exc).lower()
+            or "RateLimitError" in type(agent_exc).__name__
+        )
+        is_timeout = isinstance(agent_exc, TimeoutError)
+        if is_rate_limit:
+            tag = "rate_limit_exceeded"
+        elif is_timeout:
+            tag = "timeout"
+        else:
+            tag = "runner_error"
+        print(f"[runner] {tag.upper()}: no result.json — {error_msg}", file=sys.stderr, flush=True)
+        data = {"status": "failure", "errors": [f"{tag}: {error_msg}"]}
 
     data.update(token_info)
-    RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RESULTS_PATH.write_text(json.dumps(data, indent=2))
-    print(f"[runner] Augmented result written: {RESULTS_PATH}", flush=True)
+    _write_result(data)
+
+    # Re-raise SystemExit so the container exits with the original code.
+    if isinstance(agent_exc, SystemExit):
+        raise agent_exc
 
 
 if __name__ == "__main__":
