@@ -309,7 +309,7 @@ Harness mode uses `project_type` (from job spec: `nerv`, `medplum`, `eshoponweb`
 
 `run_job.sh` was a wrapper that built images, created Docker resources, ran the supervisor, copied results, and tore down. The example scripts (`examples/run_*_example.sh`) already do all of this directly — they build images, create network/volumes, start the supervisor via `docker run -i`, send EXEC/HEALTHCHECK/DONE commands, copy results, and clean up. `run_job.sh` added a layer without adding capability.
 
-Deleted. `scripts/` now contains only `run_agent.sh`. Harness mode is driven exclusively through example scripts.
+Deleted. `scripts/` now contains only `run_agent.sh`. Harness mode was driven exclusively through example scripts.
 
 ---
 
@@ -335,4 +335,142 @@ Per-project prompts at `projects/<type>/prompt.txt` capture:
 
 ### Prompts live inside the project directory
 
-Prompt files are co-located with the project's `docker-compose.yml` and `worker/` under `projects/<type>/`. All project-specific artifacts in one place — adding a new stack means touching only that stack's directory (plus schema enum and examples).
+Prompt files are co-located with the project's `docker-compose.yml` and `worker/` under `projects/<type>/`. All project-specific artifacts in one place — adding a new stack means touching only that stack's directory (plus schema enum).
+
+---
+
+## Agent Mode: Resource Exhaustion and Security Hardening (2026-06-09)
+
+### Host OOM in Agent Mode — Root Causes
+
+Running the pipeline in agent mode with the nerv project exhausted host machine resources. Post-mortem identified four causes:
+
+**1. OpenHands spawned inner sandbox containers via Docker socket (primary cause)**
+
+The nerv `docker-compose.yml` gave OpenHands full Docker daemon access:
+
+```yaml
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
+environment:
+  - SANDBOX_USER_ID=0
+  - SANDBOX_VOLUMES=${WORKSPACE_VOLUME}:/workspace
+  - SANDBOX_ADDITIONAL_NETWORKS=${SANDBOX_NETWORK}
+```
+
+OpenHands uses the socket to create its own runtime sandbox container on the host daemon. That inner container has no resource limits — not governed by anything in the compose file. It is also outside the `cleanup()` trap scope, so if the script exits abnormally, the inner container leaks and continues consuming resources.
+
+**2. No resource limits on the OpenHands container**
+
+Worker: `mem_limit: 1g`, `cpus: 2.0`. Redis: `mem_limit: 128m`. OpenHands: no limits. The container could consume all available host RAM.
+
+**3. No timeout on `docker wait`**
+
+`run_agent.sh` calls `docker wait "$OPENHANDS_CONTAINER"` with no timeout. If the LLM loops (bad tool calls, retry storms, hallucinated commands), the run continues until the host dies.
+
+**4. Inner containers not cleaned up on abnormal exit**
+
+`cleanup()` tears down the compose stack, but OpenHands-spawned inner containers are managed by OpenHands internally. If the outer cleanup fires before OpenHands finishes, or the script exits abnormally, those containers stay running.
+
+### Plan: Switch to OpenHands SDK (Removes Primary Cause)
+
+The active plan (`PLAN.md`) switches from the `openhands --headless` CLI to a Python SDK runner. The SDK uses a local runtime — no Docker socket needed. This eliminates inner container spawning and the associated resource leaks and host escape vector.
+
+The plan also adds:
+- `mem_limit: 2g` / `cpus: 1.0` on the openhands service
+- `timeout "${TIMEOUT_TOTAL:-1800}" docker wait` in `run_agent.sh` (reuses the same env var as the harness supervisor)
+
+### Security Findings
+
+The Docker socket removal fixes the most serious security issue, but analysis identified additional concerns.
+
+**Not fixable — accept as design trade-offs:**
+
+- `OPENHANDS_ALWAYS_APPROVE=true` is required for non-interactive headless execution. All agent tool calls (shell, file write, network) run without confirmation. Mitigated by network isolation.
+- The LLM API key is readable inside the OpenHands container by any process running as the same user (`/proc/1/environ`). File-based secrets (below) hide it from `docker inspect` but not from container-internal reads. Mitigated by keeping the key low-value (Groq free-tier) and rotating after runs if needed.
+
+**Fixable — captured in `PLAN.md` Step 3:**
+
+| Issue | Fix |
+|-------|-----|
+| API key visible in `docker inspect` | Docker Compose file-based secret — write key to temp file, mount at `/run/secrets/groq_api_key`, runner reads from file, remove from `environment:` block |
+| Worker and OpenHands on same external-routable network — worker (running untrusted repo code) can make arbitrary outbound calls | Make `sandbox` network `--internal` (no external routing); give OpenHands a second `llm-net` network for LLM API egress only. Worker and Redis stay on internal-only sandbox. |
+| Unpinned `pip install openhands-ai` — supply chain risk | Pin to a specific version once Step 1 of the plan confirms the correct package |
+| Unpinned `python:3.11-slim` base image | Pin to `python:3.11.9-slim` |
+| OpenHands container runs as root (default for `python:3.11-slim`) | Pre-baked image (already the plan's alternative to pip-at-start) installs SDK as root, adds non-root user, runs as non-root. `user: nobody` inline doesn't work cleanly with pip-at-start. |
+| Results volume writable by worker in agent mode | Worker doesn't write `result.json` in agent mode. Change mount to `results:/sandbox/results:ro` on the worker service. |
+
+### `Dockerfile.openhands` Is Unused
+
+`projects/nerv/Dockerfile.openhands` exists but is not referenced in `docker-compose.yml` — the compose file pulls `ghcr.io/all-hands-ai/openhands:latest` directly. Node.js installed in that Dockerfile has no effect. The file will be removed or repurposed when the SDK migration (pre-baked image path) is implemented.
+
+### Plan: timeout env var source
+
+The plan reuses `TIMEOUT_TOTAL` for `docker wait` timeout. That variable was previously set and documented in the supervisor — which is now deleted. `TIMEOUT_TOTAL` must be set in `.env` or the shell environment before calling `run_agent.sh`. The default of 1800s applies if unset.
+
+---
+
+## Harness Mode Removed (2026-06-09)
+
+### Decision
+
+Harness mode (EXEC/HEALTHCHECK/DONE protocol driven by example scripts) was removed entirely. Agent mode (`run_agent.sh` + OpenHands) is the only execution path going forward.
+
+Harness mode was designed as a deterministic demo and debugging tool — a scripted stand-in while the agent runner was being built. Once the agent runner was functional and the goal shifted to evaluating unknown repos autonomously, the harness added no value. Maintaining two parallel execution paths (harness and agent) with separate supervisors, example scripts, and compose profiles introduced complexity without benefit.
+
+### What was deleted
+
+| Path | Contents |
+|------|----------|
+| `supervisor/` | Harness supervisor — `Dockerfile`, `entrypoint.sh`, `lib/capture.sh`, `lib/clone.sh`, `lib/exec.sh`, `lib/orchestrate.sh` (~330 lines total) |
+| `examples/` | Three harness example scripts — `run_nerv_example.sh`, `run_medplum_example.sh`, `run_eshoponweb_example.sh` |
+
+### What changed
+
+- `projects/*/docker-compose.yml` — removed `profiles: [agent]` from the openhands service. With harness gone, there is no plain `docker compose up` path; `run_agent.sh` always starts the full stack including OpenHands. The profile guard was dead code.
+- `scripts/run_agent.sh` — removed `--profile agent` from both `compose up` and `compose down` invocations.
+- All compose file headers and worker Dockerfiles — updated stale comments referencing "the supervisor" to reference `run_agent.sh`.
+
+### CLAUDE.md harness documentation
+
+`CLAUDE.md` still contains harness mode documentation (EXEC protocol, workspace inspection table, harness failure interpretation). That section should be removed or replaced with agent-mode-only guidance in a follow-up update.
+
+---
+
+## SDK Migration — Two-Image SSH Architecture (2026-06-10)
+
+### Single-image approach discarded
+
+First implementation replaced the old OpenHands CLI container with a single `python:3.11.9-slim` image that installs `openhands-ai` + Node.js 20. This worked structurally but had a scaling problem: every project type needs its own `Dockerfile.openhands` embedding the project runtime (Node.js for nerv, .NET for eshoponweb, etc.). The agent image is never reusable across project types.
+
+### Worker container was dead weight in single-image mode
+
+The worker Dockerfile's CMD comment read: "Keeps the container alive for docker exec commands from the agent." With OpenHands SDK's `LocalRuntime`, the agent runs commands inside its own container — no docker exec, no Docker socket. The worker was kept in compose but served no purpose.
+
+Once this was recognised, the correct response was not to delete the worker but to redesign: if the worker is the right execution environment (it has the project runtime, correct UID, correct tools), make the agent use it.
+
+### Two-image architecture
+
+Worker: project runtime (Node.js, .NET, etc.) + `openssh-server`. Runs `sshd`. Receives commands from agent over SSH as `sandboxuser`.
+
+Agent: `python:3.11.9-slim` + `openhands-ai` + `paramiko`. Project-agnostic. All project types use the same `ai-sandbox-agent` image built from `docker/Dockerfile.agent`. SSHes into worker to execute all build/test/start commands.
+
+This gives one agent image across all project types. Only worker images differ per project — they already did.
+
+### Ephemeral SSH key distribution
+
+`run_agent.sh` generates a fresh `ed25519` key pair before compose up. Public key passed to worker via `AGENT_SSH_PUBKEY` env var; worker entrypoint writes it to `sandboxuser`'s `authorized_keys` then execs `sshd`. Private key bind-mounted read-only into agent container at `/run/secrets/ssh_key`. Both files deleted in cleanup trap. No persistent keys, no hardcoded credentials.
+
+### Worker needs internet — sandbox-internal constraint dropped
+
+Initial plan made the sandbox network `--internal` to prevent worker (running untrusted code) from making outbound calls. But the agent SSHes into worker to run `npm install` — those commands execute on the worker, which needs npm registry access. Worker can't be on an internal-only network.
+
+Resolution: worker joins the `llm` network alongside the agent container. Both get internet. Redis and other data services stay on sandbox-only. The `--internal` flag was dropped; security relies on Docker socket removal, resource limits, and `cap_drop: ALL` instead.
+
+### SSHRuntime open question
+
+`openhands_runner.py` needs a custom `SSHRuntime` class (paramiko-based) implementing OpenHands' `Runtime` interface. Key unknown before implementation: does `run_controller` accept an arbitrary runtime object passed by the caller, or does it only accept runtimes created via `create_runtime(config)`? If the former, the custom runtime pattern works directly. If the latter, need to configure via `AppConfig` remote runtime settings. Captured in PLAN.md open question 1.
+
+### Docs updated before implementation
+
+Architecture decision finalised in PLAN.md before any code changes to the SSH-related files. CLAUDE.md and ARCHITECTURE.md updated to reflect the two-image pattern. This caught the worker-internet issue (open question 3 in original PLAN) before it would have caused a silent `npm install` failure on first run.
