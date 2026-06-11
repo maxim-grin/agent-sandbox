@@ -14,6 +14,12 @@ ENV PATH="/root/.opencode/bin:${PATH}"
 ENV SHELL=/bin/bash
 RUN curl -fsSL https://opencode.ai/install | bash
 
+# opencode plugins: special-edition (reduce system prompt/tool tokens)
+RUN npm install -g @anthonyfangqing/opencode-special-edition \
+    && mkdir -p /root/.opencode \
+    && echo '{"plugin":["@anthonyfangqing/opencode-special-edition"]}' \
+       > /root/.opencode/opencode.json
+
 COPY --from=toolchain /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=toolchain /usr/local/bin/tsc          /usr/local/bin/tsc
 COPY --from=toolchain /usr/local/bin/ts-node      /usr/local/bin/ts-node
