@@ -27,7 +27,9 @@ End-to-end pipeline run:
 
 ## Runner
 
-Single runner: `scripts/run_agent.sh`. OpenHands LLM agent decides all commands autonomously via SSH into worker container.
+Single runner: `scripts/run_agent.sh`. opencode agent drives 4-stage pipeline via HTTP API (`docker exec curl` into worker). No agent container. No SSH.
+
+Mock mode: `MOCK=true ./scripts/run_agent.sh <job_spec>` — skips clone, uses fixture workspace, points LLM at local mock server.
 
 ---
 
@@ -37,52 +39,50 @@ Five things to create.
 
 ### 1. `projects/<type>/worker/Dockerfile`
 
-Project runtime + SSHd. Agent SSHes into this container to run all commands.
+Project runtime + opencode binary. Multi-stage build. Non-root user.
 
 ```dockerfile
-FROM <runtime-image>   # must be multi-arch if Apple Silicon support is needed
+FROM <runtime-image> AS toolchain
+RUN <install runtime tools>
 
-RUN <install git curl openssh and any system deps>
+FROM <runtime-image> AS runtime
+RUN apk add --no-cache git curl wget jq
+# install opencode binary
+RUN curl -fsSL https://opencode.ai/install | sh
+# install tokenscope plugin
+RUN npm install -g @ramtinj95/opencode-tokenscope
 
-RUN addgroup -g 1001 sandboxgroup && adduser -u 1001 -G sandboxgroup -m sandboxuser
-RUN mkdir -p /workspace /sandbox/results/logs \
-    && chown -R sandboxuser:sandboxgroup /workspace /sandbox
+RUN addgroup -S -g 1001 ocgroup && adduser -S -u 1001 -G ocgroup -s /bin/sh ocuser
+RUN mkdir -p /workspace /sandbox/results \
+    && chown -R ocuser:ocgroup /workspace /sandbox
 
-# SSH host keys (stable across container restarts within a run)
-RUN ssh-keygen -A
-RUN mkdir -p /home/sandboxuser/.ssh \
-    && chown sandboxuser:sandboxgroup /home/sandboxuser/.ssh \
-    && chmod 700 /home/sandboxuser/.ssh
-
+COPY --from=toolchain <tools> <dest>
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+USER ocuser
 WORKDIR /workspace
 
-HEALTHCHECK --interval=5s --timeout=5s --retries=3 CMD <runtime version check>
+HEALTHCHECK --interval=5s --timeout=5s --retries=6 \
+  CMD wget -q -O /dev/null http://localhost:4096/global/health
 CMD ["/usr/local/bin/docker-entrypoint.sh"]
 ```
 
 ### 2. `projects/<type>/worker/docker-entrypoint.sh`
 
-Writes agent's public key, starts SSHd.
+Reads API key from Docker secret, starts opencode serve.
 
 ```bash
 #!/bin/sh
 set -e
 
-if [ -n "${AGENT_SSH_PUBKEY:-}" ]; then
-    echo "$AGENT_SSH_PUBKEY" > /home/sandboxuser/.ssh/authorized_keys
-    chown sandboxuser:sandboxgroup /home/sandboxuser/.ssh/authorized_keys
-    chmod 600 /home/sandboxuser/.ssh/authorized_keys
-fi
-
-exec /usr/sbin/sshd -D -e
+export OPENAI_API_KEY=$(cat /run/secrets/groq_key)
+exec opencode serve --hostname 127.0.0.1 --port 4096
 ```
 
 ### 3. `projects/<type>/docker-compose.yml`
 
-Worker + data services + openhands agent. Two separate images — worker has project runtime, openhands has SDK only.
+Worker + data services only. No agent container.
 
 ```yaml
 services:
@@ -92,62 +92,31 @@ services:
       dockerfile: Dockerfile
     image: ai-sandbox-<type>-worker
     container_name: "${RUN_ID}-<type>-worker-1"
-    networks: [sandbox, llm]    # llm needed for package installs (npm, pip, etc.)
+    networks: [sandbox, llm]
     volumes:
       - workspace:/workspace
       - results:/sandbox/results:ro
     working_dir: /workspace
     environment:
       CI: "true"
-      AGENT_SSH_PUBKEY: "${AGENT_SSH_PUBKEY}"
+      OPENAI_BASE_URL: "${LLM_BASE_URL}"
+      OPENCODE_SERVER_PASSWORD: "${OPENCODE_SERVER_PASSWORD}"
       # stack-specific env vars
+    secrets:
+      - groq_key
     mem_limit: <Xg>
     cpus: <N>
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     healthcheck:
-      test: ["CMD", "<version check>"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:4096/global/health"]
       interval: 5s
       timeout: 5s
-      retries: 3
-      start_period: 10s
+      retries: 6
+      start_period: 15s
 
-  # optional data service containers (postgres, redis, …)
-  # data services: networks: [sandbox] only — no internet needed
-
-  openhands:
-    build:
-      context: ../..
-      dockerfile: docker/Dockerfile.agent
-    image: ai-sandbox-agent
-    container_name: "${RUN_ID}-<type>-openhands"
-    environment:
-      - LLM_MODEL=${LLM_MODEL}
-      - LLM_API_KEY=${GROQ_API_KEY}
-      - LLM_BASE_URL=${LLM_BASE_URL}
-      - LLM_USE_JSON_MODE=true
-      - OPENHANDS_ALWAYS_APPROVE=true
-      - TASK=${TASK}
-      - SSH_HOST=worker
-      - SSH_USER=sandboxuser
-      - SSH_KEY=/run/secrets/ssh_key
-      # stack-specific vars (REDIS_URL, POSTGRES_HOST, etc.)
-    volumes:
-      - results:/sandbox/results
-      - ${RUNNER_SCRIPT}:/app/openhands_runner.py:ro
-      - ${SSH_KEY_PATH}:/run/secrets/ssh_key:ro
-    working_dir: /app
-    networks: [sandbox, llm]
-    depends_on:
-      worker: {condition: service_healthy}
-      # add data service deps here
-    mem_limit: 2g
-    cpus: 1.0
-    security_opt: [no-new-privileges:true]
-    cap_drop: [ALL]
-    stdin_open: false
-    tty: false
-    command: python openhands_runner.py
+  # optional data services (postgres, redis, …)
+  # data services: networks: [sandbox] only
 
 networks:
   sandbox:
@@ -164,11 +133,29 @@ volumes:
   results:
     external: true
     name: "${RESULTS_VOLUME}"
+
+secrets:
+  groq_key:
+    file: "${GROQ_KEY_FILE}"
 ```
 
-### 4. `projects/<type>/prompt.txt`
+### 4. `projects/<type>/commands/`
 
-Agent task prompt for this stack. Include: runtime version, data service URLs (env vars already set), known quirks (e.g. monorepo build flags, health check route, test database setup). See existing prompts for format.
+Four opencode command files — one per pipeline stage. Each uses `subtask: true` for context isolation.
+
+`discovery.md`:
+```markdown
+---
+description: Discover build/test/run commands
+model: openai/llama-3.3-70b-versatile
+subtask: true
+---
+Read /workspace/package.json (or equivalent manifest).
+Write /workspace/.pipeline/discovery.json: { install_cmd, build_cmd, test_cmd, start_cmd, health_url, port }.
+```
+
+`build.md`, `tests.md`, `run.md` follow same pattern with `!cat` shell injection for prior stage output.
+See existing `projects/nerv/commands/` for reference.
 
 ### 5. Schema
 
@@ -176,12 +163,11 @@ Agent task prompt for this stack. Include: runtime version, data service URLs (e
 
 ### Key invariants
 
-- **Worker container name** must be `${RUN_ID}-<type>-worker-1`. `run_agent.sh` derives the worker name from this pattern.
-- **OpenHands container name** follows `${RUN_ID}-<type>-openhands`. `run_agent.sh` uses this to wait for exit.
+- **Worker container name** must be `${RUN_ID}-<type>-worker-1`. `run_agent.sh` derives worker name from this pattern.
+- **No agent container** — `run_agent.sh` drives stages via `docker exec curl` into worker.
 - **Network and volumes are external** — runner creates before compose, destroys after. Never `driver: local`.
-- **Worker runs SSHd** — agent container SSHes in as `sandboxuser` (UID 1001) to execute all commands.
-- **Results volume read-only on worker** — OpenHands agent owns `result.json` writes via direct volume mount. Worker mounts results as `:ro`.
-- **Shared agent image** — `docker/Dockerfile.agent` is project-agnostic. All project types use same `ai-sandbox-agent` image.
+- **Worker runs opencode serve on 127.0.0.1:4096** — not exposed on container network interface.
+- **Results volume read-only on worker** — stage JSONs written to `/workspace/.pipeline/`; collected by runner via `docker exec cat`.
 
 ---
 
@@ -192,32 +178,34 @@ Agent task prompt for this stack. Include: runtime version, data service URLs (e
 Copy `.example.env` → `.env`, fill in keys:
 
 ```bash
-LLM_MODEL=groq/llama-3.1-8b-instant
+LLM_MODEL=llama-3.3-70b-versatile
 GROQ_API_KEY=
 LLM_BASE_URL=https://api.groq.com/openai/v1
 ```
 
 `.env` is gitignored. `.example.env` is committed.
 
-### Prompt
-
-Task prompt lives in `projects/<project_type>/prompt.txt` — one file per project type. Not hardcoded in YAML.  
-`run_agent.sh` reads `projects/${PROJECT_TYPE}/prompt.txt` → exports `TASK` env var → compose substitutes into command. Errors if no prompt file exists for the given project type.
-
 ### Running
 
 ```bash
 ./scripts/run_agent.sh job_specs/nerv.json
+
+# mock mode (no Groq key needed)
+MOCK=true ./scripts/run_agent.sh job_specs/nerv.json
 ```
 
-Runner: generates SSH key pair → creates networks/volumes → clones repo → starts compose → waits for OpenHands exit → copies results → tears down.
+Runner lifecycle: creates networks/volumes → clones repo → starts compose → waits for worker healthy → copies commands → creates session → runs 4-stage loop via HTTP API → aggregates results → tears down.
 
 ### Results
 
 ```
 run_results/{project_name}/{runid}/
-  result.json        ← written by OpenHands agent (prompt instructs format), augmented with token/cost
-  agent_output.log   ← captured stdout
+  result.json           ← aggregated from stage JSONs by run_agent.sh
+  logs/
+    discovery.json
+    build.json
+    tests.json
+    run.json
 ```
 
 `project_name` derived from `repo_url` (last path segment, strip `.git`).
@@ -227,55 +215,50 @@ run_results/{project_name}/{runid}/
 ```json
 {
   "status": "success|failure",
-  "build":        { "status": "...", "command": "...", "exit_code": 0, "logs": "..." },
-  "start_server": { "status": "...", "command": "...", "logs": "..." },
-  "tests":        { "status": "...", "command": "...", "passed": 0, "failed": 0, "logs": "..." },
-  "health_check": { "status": "...", "url": "...", "response_code": 200, "logs": "..." },
-  "errors":       [],
+  "discovery": { "status": "...", "logs": "..." },
+  "build":     { "status": "...", "exit_code": 0, "logs": "..." },
+  "tests":     { "status": "...", "passed": 0, "failed": 0, "logs": "..." },
+  "run":       { "status": "...", "response_code": 200, "logs": "..." },
+  "errors":    [],
   "duration_seconds": 0,
-  "session_tokens": {
-    "prompt_tokens": 0,
-    "completion_tokens": 0,
-    "cache_read_tokens": 0,
-    "cache_write_tokens": 0
+  "stages": {
+    "discovery": { "session_tokens": {}, "session_cost": 0.0 },
+    "build":     { "session_tokens": {}, "session_cost": 0.0 },
+    "tests":     { "session_tokens": {}, "session_cost": 0.0 },
+    "run":       { "session_tokens": {}, "session_cost": 0.0 }
   },
-  "session_cost": 0.0
+  "total_cost": 0.0
 }
 ```
-
-`session_tokens` and `session_cost` added by `scripts/openhands_runner.py` after agent exits.
 
 ---
 
 ## Architecture
 
-Docker-based AI agent sandbox. Execution env for AI coding agents, not CI. Generic across stacks.
+Docker-based AI agent sandbox. opencode LLM agent drives 4-stage pipeline against cloned repo. Generic across stacks.
 
 Design priorities: **single sandbox + pluggable stacks**, **separate data services per stack**, **clean state per run**, **non-interactive execution**, **structured output capture**.
 
-### Two-image design
+### Single-container design
 
-Each run has two containers: **worker** and **openhands**.
+One container per run: **worker** (project runtime + opencode serve). `run_agent.sh` on host drives stages via `docker exec curl` HTTP API calls.
 
-- **Worker** (`ai-sandbox-<type>-worker`) — project runtime (Node.js, .NET, etc.) + SSHd. Receives commands from agent over SSH. Project-specific image, built from `projects/<type>/worker/Dockerfile`.
-- **Openhands** (`ai-sandbox-agent`) — openhands-ai SDK + paramiko. Project-agnostic shared image built from `docker/Dockerfile.agent`. Makes LLM API calls; SSHes into worker to run all build/test/start commands.
+- **Worker** (`ai-sandbox-<type>-worker`) — project runtime + opencode binary + tokenscope plugin. Runs `opencode serve`. All LLM calls and bash tool execution happen inside this container.
 
 ### Sandbox responsibilities
 
-- Isolated, reproducible env: stack containers, dedicated Docker network + volumes per run.
+- Isolated, reproducible env: stack containers, dedicated Docker networks + volumes per run.
 - Lifecycle + clean state: fresh workspace, fresh data per run.
 - Enforce: non-interactive, security/isolation, resource limits.
-- Capture: logs, structured `result.json`.
+- Capture: structured `result.json` aggregated from stage outputs.
 
 ### Agent responsibilities
 
-- Inspect repo manifests (`package.json`, `Dockerfile`, `docker-compose.yml`, docs).
-- Figure out how to install deps, build, run tests, start service, probe healthcheck.
-- Decide concrete commands and order.
-- Execute autonomously via SSH into worker.
-- Interpret logs/result and decide next steps.
+- Inspect repo manifests (`package.json`, `Dockerfile`, etc.) during discovery stage.
+- Execute install, build, test, start-server commands in subsequent stages.
+- Write structured JSON after each stage to `/workspace/.pipeline/`.
 
-> Sandbox must not hard-code project-specific build/test/run commands. Sandbox exposes env + execution; agent chooses commands from manifest files.
+> Sandbox must not hard-code project-specific commands. Each stage prompt instructs the agent to read manifests and prior stage output.
 
 ### Job spec
 
@@ -290,34 +273,33 @@ Each run has two containers: **worker** and **openhands**.
 ### Runner lifecycle
 
 1. Parse job spec.
-2. Generate ephemeral ed25519 SSH key pair (per-run, deleted in cleanup trap).
-3. Create Docker networks: `${RUN_ID}` (sandbox) + `${RUN_ID}-llm` (egress).
-4. Create volumes: workspace + results.
-5. Clone repo at commit into workspace volume.
-6. Start compose stack (worker + data services + openhands).
-7. Wait for OpenHands container to exit (`timeout ${TIMEOUT_TOTAL:-1800}`).
-8. Copy results to `run_results/{project}/{runid}/`.
-9. Tear down compose, remove networks + volumes.
-
-### Results layout
-
-```
-/sandbox/results/result.json
-/sandbox/results/agent_output.log
-```
+2. Generate `OPENCODE_SERVER_PASSWORD` (random hex, per-run).
+3. Write API key to tmpfile (`GROQ_KEY_FILE`).
+4. Create Docker networks: `${RUN_ID}` (sandbox) + `${RUN_ID}-llm` (egress).
+5. Create volumes: workspace + results.
+6. Clone repo at commit into workspace volume.
+7. Start compose stack (worker + data services).
+8. Wait for worker healthcheck (`GET /global/health` → `{ healthy: true }`).
+9. `docker cp` stage command files → `/workspace/.opencode/commands/`.
+10. Create opencode session via `POST /session`.
+11. Run 4-stage loop: `POST /session/:id/command { command: stage }` for each stage; abort on failure.
+12. After each stage: run tokenscope, collect token/cost.
+13. Collect stage JSONs via `docker exec cat`; aggregate → `result.json`.
+14. Copy results to `run_results/{project}/{runid}/`.
+15. Tear down compose, remove networks + volumes + tmpfiles.
 
 ### Security
 
-Treat worker code as untrusted.
-
-- **No Docker socket** — neither agent nor worker mounts `/var/run/docker.sock`. Eliminates host escape vector.
-- **Filesystem** — worker mounts results read-only; openhands agent owns result writes via direct volume mount.
-- **Network** — two dedicated Docker networks per run: `sandbox` (inter-container) and `llm` (egress). Worker + openhands on both (need package registry + LLM API). Data services (redis/db) on sandbox only.
-- **SSH** — ephemeral ed25519 key pair generated per run. Public key passed to worker via env; private key mounted into agent container. Keys deleted in cleanup trap.
-- **Container hardening** — drop caps, `no-new-privileges` on all containers; resource limits (`mem_limit` + `cpus`).
-- **Run timeout** — `TIMEOUT_TOTAL` (default 1800s) wraps `docker wait`.
+- **No Docker socket** — worker does not mount `/var/run/docker.sock`.
+- **Non-root user** — `ocuser` (UID 1001); opencode serve runs as non-root.
+- **API key** — Docker secret (tmpfile mount); entrypoint reads before serve starts; never in container env.
+- **Server auth** — `OPENCODE_SERVER_PASSWORD` (random per run); all `docker exec curl` calls use HTTP basic auth.
+- **opencode serve bind** — `127.0.0.1` only; not reachable from other containers on same network.
+- **Network** — sandbox (inter-container) + llm (egress); data services on sandbox only.
+- **Container hardening** — `cap_drop: ALL`, `no-new-privileges`; no `cap_add` needed.
+- **Run timeout** — `TIMEOUT_TOTAL` (default 1800s) wraps stage loop.
 
 ### Build performance
 
-- Pre-built images (`ai-sandbox-<type>-worker`, `ai-sandbox-agent`) — compose caches between runs.
+- Pre-built worker image (`ai-sandbox-<type>-worker`) — compose caches between runs.
 - Shallow clone (`--depth=1`) for fast workspace setup.

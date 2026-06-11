@@ -437,6 +437,50 @@ Harness mode was designed as a deterministic demo and debugging tool — a scrip
 
 ---
 
+## Migration: opencode + Multistage Pipeline (2026-06-11)
+
+### Decision: drop openhands, adopt opencode
+
+openhands SDK integration worked but had two structural problems: (1) massive system prompt (~15k tokens) immediately exhausted Groq free-tier TPM on first request; (2) the custom `SSHRuntime` implementation was fragile — every openhands-ai version bump broke the internal API.
+
+opencode is a purpose-built coding agent CLI with a stable HTTP server API (`opencode serve`). The HTTP API (`POST /session/:id/command`) is a versioned contract, not internal Python class introspection. No SDK to maintain.
+
+### Decision: single container, no agent container
+
+Previous architecture required a separate openhands container that SSHed into worker. With opencode running inside the worker, the agent container is eliminated entirely. `run_agent.sh` drives stages via `docker exec curl` — no inter-container networking needed for agent→worker comms.
+
+Side effects: SSH keypair generation removed, no `cap_add: [SETUID, SETGID, SYS_CHROOT]` needed, no `Dockerfile.agent`, no `openhands_runner.py`.
+
+### Decision: 4-stage pipeline with context isolation
+
+Single monolithic prompt was the cause of both token bloat and poor result attribution — a failure could happen anywhere and the agent had to reason across the entire pipeline history.
+
+Four focused stages (discovery → build → tests → run) each run as an opencode `subtask: true` command — isolated LLM context per stage. State passes through `/workspace/.pipeline/<stage>.json` files. Shell injection (`!cat`) pulls prior stage output into each prompt at invocation time.
+
+Benefits: smaller per-stage token windows, per-stage cost tracking, clear failure attribution, stages can be re-run independently.
+
+### Decision: TDD with mock LLM
+
+`scripts/mock/llm_server.py` — OpenAI-compatible mock server returning canned responses. `MOCK=true` flag in `run_agent.sh` skips real clone and points `LLM_BASE_URL` at mock. Every stage is verified against mock before touching real Groq API. Eliminates API cost from iteration cycles and makes test runs deterministic.
+
+### Decision: opencode serve HTTP API over CLI
+
+`opencode run "<prompt>"` was the initial approach. Switched to `opencode serve` + HTTP API because:
+- `POST /session/:id/command` is synchronous and returns structured JSON — no output parsing needed
+- `GET /global/health` gives a reliable healthcheck endpoint
+- `POST /session/:id/command { command: "tokenscope" }` integrates token tracking without any runner changes
+- Sessions can be created/deleted explicitly — context lifecycle is under orchestrator control, not CLI process lifecycle
+
+### Token tracking: tokenscope plugin
+
+`@ramtinj95/opencode-tokenscope` npm plugin provides per-session token breakdown and cost calculation via `/tokenscope` command. Installed in worker image, called after each stage. Replaces openhands `state.metrics.accumulated_token_usage` with a proper per-stage breakdown.
+
+### Staged delivery: nerv → medplum → eshoponweb
+
+Implementation follows a strict gate order: Stage 1 (hello world) → Stage 2 (tokenscope) → Stage 3 (security) → Stage 4 (multistage) → Stage 5 (nerv MVP mock) → Stage 6 (nerv real) → medplum → eshoponweb. No next stage starts until previous passes on both mock and real LLM. medplum and eshoponweb built directly with opencode pattern — the old "pending SSH two-image pattern" items are superseded.
+
+---
+
 ## SDK Migration — Two-Image SSH Architecture (2026-06-10)
 
 ### Single-image approach discarded
