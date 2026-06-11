@@ -99,8 +99,8 @@ Shell injection (`!cat /workspace/.pipeline/<stage>.json`) pulls prior stage out
 | Component | Responsibility |
 |-----------|---------------|
 | `run_agent.sh` | Load `.env`; create networks + volumes; clone repo; start compose; wait for worker healthy; copy commands; create session; run 4-stage loop via HTTP API; aggregate results; teardown |
-| `projects/<type>/worker/Dockerfile` | Project runtime + opencode binary + tokenscope plugin. Multi-stage build. Non-root `ocuser` (UID 1001) |
-| `projects/<type>/worker/docker-entrypoint.sh` | Read API key from Docker secret; exec `opencode serve --hostname 127.0.0.1 --port 4096` |
+| `projects/<type>/worker/Dockerfile` | Project runtime + opencode binary + tokenscope plugin. Multi-stage build. Runs as root currently; non-root `ocuser` (UID 1001) planned in Stage 3 |
+| `projects/<type>/worker/docker-entrypoint.sh` | exec `opencode serve --hostname 127.0.0.1 --port 4096` (API key from Docker secret planned Stage 3) |
 | `projects/<type>/docker-compose.yml` | Worker + data services; declares external networks + volumes; no agent service |
 | `projects/<type>/commands/*.md` | Per-stage opencode command files with frontmatter (`subtask: true`, `model`) and shell injection |
 | `.example.env` / `.env` | LLM credentials: `LLM_MODEL`, `GROQ_API_KEY`, `LLM_BASE_URL` |
@@ -132,17 +132,17 @@ Data services join sandbox only. Worker joins both.
 
 ## Security Model
 
-| Concern | Implementation |
-|---------|---------------|
-| Docker socket | Not mounted on any container |
-| Code execution user | `ocuser` (UID 1001, non-root) — opencode serve runs as non-root |
-| API key | Docker secret (tmpfile mount); entrypoint reads before starting serve; never in container env |
-| Server auth | `OPENCODE_SERVER_PASSWORD` (random per run); all `docker exec curl` calls use HTTP basic auth |
-| opencode serve bind | `127.0.0.1` only — not reachable from other containers on same network |
-| Container hardening | `no-new-privileges` + `cap_drop: ALL`; no `cap_add` needed (opencode needs no Linux capabilities) |
-| Resource limits | `mem_limit` + `cpus` on all containers |
-| Run timeout | `TIMEOUT_TOTAL` (default 1800s) wraps stage loop |
-| Results integrity | Worker mounts results volume `:ro`; stage JSONs written to workspace, collected via `docker exec cat` |
+| Concern | Implementation | Status |
+|---------|---------------|--------|
+| Docker socket | Not mounted on any container | ✅ |
+| Code execution user | Runs as root currently; `ocuser` (UID 1001) planned Stage 3 | ⏳ |
+| API key | Docker secret (tmpfile mount) planned Stage 3; currently via env var | ⏳ |
+| Server auth | `OPENCODE_SERVER_PASSWORD` per run planned Stage 3; currently unsecured | ⏳ |
+| opencode serve bind | `127.0.0.1` only — not reachable from other containers on same network | ✅ |
+| Container hardening | `no-new-privileges` + `cap_drop: ALL` on all containers | ✅ |
+| Resource limits | `mem_limit` + `cpus` on all containers | ✅ |
+| Run timeout | `TIMEOUT_STAGE` (default 180s) polls for result.json | ✅ |
+| Workspace permissions | `chmod 777 /workspace` — required because `cap_drop: ALL` removes `CAP_DAC_OVERRIDE` | ✅ |
 
 ---
 
@@ -152,11 +152,11 @@ Data services join sandbox only. Worker joins both.
 
 | Component | Purpose |
 |-----------|---------|
-| `scripts/mock/llm_server.py` | OpenAI-compat HTTP server; returns canned responses keyed by command name |
-| `scripts/mock/docker-compose.mock.yml` | mock-llm service on llm network; injected alongside worker stack |
+| `scripts/mock/llm_server.py` | OpenAI Responses API SSE mock (`POST /v1/responses` with `stream: true`). Logic: no tools → text response; tools + no tool result → bash function_call; tools + tool result → text "Done." |
+| `scripts/mock/docker-compose.mock.yml` | mock-llm service on llm network; injected alongside worker stack. Uses `${MOCK_DIR}` absolute path (Docker Compose resolves relative paths in `-f` overlays relative to the first compose file) |
 | `scripts/mock/workspace/` | Minimal fixture repo (package.json + stub) — no GitHub clone needed |
-| `scripts/mock/responses/` | JSON canned response files per stage |
-| `scripts/test_pipeline.sh` | Asserts: worker healthy, session created, all stage JSONs present, result.json valid |
+
+**opencode ≥ 1.17 uses OpenAI Responses API** (`/v1/responses`), not `/v1/chat/completions`. Always sends `stream: true` — mock must return `Content-Type: text/event-stream`. The `bash` tool arguments schema requires `{command, description}` — omitting `description` returns SchemaError.
 
 ---
 

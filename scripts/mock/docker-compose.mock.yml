@@ -1,0 +1,27 @@
+services:
+  mock-llm:
+    image: python:3.12-alpine
+    container_name: "${RUN_ID}-mock-llm"
+    networks:
+      - llm
+    working_dir: /app
+    volumes:
+      - "${MOCK_DIR}/llm_server.py:/app/llm_server.py:ro"
+    command: python /app/llm_server.py
+    mem_limit: 128m
+    cpus: 0.5
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+networks:
+  llm:
+    external: true
+    name: "${LLM_NETWORK}"
