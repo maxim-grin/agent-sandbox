@@ -25,6 +25,7 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_BASE_URL: "${LLM_BASE_URL:-}"
       GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "${OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX:-4096}"
     mem_limit: 2g
     cpus: 2.0
     security_opt:

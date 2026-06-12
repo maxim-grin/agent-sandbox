@@ -227,6 +227,35 @@ done
 mkdir -p "$HOST_RESULTS"
 docker exec "$WORKER_CONTAINER" cat /workspace/result.json > "$HOST_RESULTS/result.json"
 
+# --- Collect token stats via opencode stats ---
+# Output uses box-drawing format: │Input   0 │, │Output  0 │, │Total Cost  $0.00 │
+echo "[run_agent] Collecting token stats..."
+STATS_RAW=$(docker exec "$WORKER_CONTAINER" opencode stats --days 1 2>/dev/null || true)
+# || true on each line prevents grep exit-1 (no match) from killing script under set -o pipefail
+INPUT=$(echo "$STATS_RAW"   | grep 'Input '     | grep -v 'Cache' | grep -oE '[0-9,]+' | head -1 | tr -d ',' || true)
+OUTPUT=$(echo "$STATS_RAW"  | grep 'Output '    | grep -v 'Cache' | grep -oE '[0-9,]+' | head -1 | tr -d ',' || true)
+CACHE_R=$(echo "$STATS_RAW" | grep 'Cache Read' | grep -oE '[0-9,]+' | head -1 | tr -d ',' || true)
+CACHE_W=$(echo "$STATS_RAW" | grep 'Cache Write'| grep -oE '[0-9,]+' | head -1 | tr -d ',' || true)
+COST=$(echo "$STATS_RAW"    | grep 'Total Cost' | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
+INPUT="${INPUT:-0}"; OUTPUT="${OUTPUT:-0}"; CACHE_R="${CACHE_R:-0}"; CACHE_W="${CACHE_W:-0}"; COST="${COST:-0}"
+[[ -n "$STATS_RAW" ]] \
+  && echo "[run_agent] Stats: input=$INPUT output=$OUTPUT cache_r=$CACHE_R cache_w=$CACHE_W cost=\$$COST" \
+  || echo "[run_agent] WARNING: opencode stats returned no output"
+
+STAGE_TOKENS=$(jq -n \
+  --argjson input   "$INPUT"  \
+  --argjson output  "$OUTPUT" \
+  --argjson cache_r "$CACHE_R" \
+  --argjson cache_w "$CACHE_W" \
+  '{input: $input, output: $output, cache_read: $cache_r, cache_write: $cache_w,
+    total: ($input + $output + $cache_r + $cache_w)}')
+
+jq --argjson tokens "$STAGE_TOKENS" \
+   --argjson cost   "$COST" \
+   '. + {session_tokens: $tokens, session_cost: $cost}' \
+   "$HOST_RESULTS/result.json" > "$HOST_RESULTS/result.json.tmp" \
+  && mv "$HOST_RESULTS/result.json.tmp" "$HOST_RESULTS/result.json"
+
 trap - EXIT
 cleanup
 

@@ -49,8 +49,6 @@ FROM <runtime-image> AS runtime
 RUN apk add --no-cache git curl wget jq
 # install opencode binary
 RUN curl -fsSL https://opencode.ai/install | sh
-# install tokenscope plugin
-RUN npm install -g @ramtinj95/opencode-tokenscope
 
 RUN addgroup -S -g 1001 ocgroup && adduser -S -u 1001 -G ocgroup -s /bin/sh ocuser
 RUN mkdir -p /workspace /sandbox/results \
