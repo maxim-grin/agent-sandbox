@@ -7,7 +7,7 @@
 # All Docker resources (network, workspace volume, results volume) are created
 # by run_agent.sh before this compose file is invoked, so they are declared
 # external here. run_agent.sh passes RUN_ID, SANDBOX_NETWORK,
-# WORKSPACE_VOLUME, RESULTS_VOLUME, and WORKER_IMAGE as environment variables.
+# WORKSPACE_VOLUME, RESULTS_VOLUME, GROQ_KEY_FILE, and LLM_BASE_URL.
 
 services:
   worker:
@@ -23,19 +23,8 @@ services:
       CI: "true"
       DOTNET_CLI_TELEMETRY_OPTOUT: "1"
       DOTNET_NOLOGO: "1"
-      # Use in-memory EF Core databases instead of SQL Server.
-      # Checked by Dependencies.ConfigureLocalDatabaseContexts() in
-      # src/Infrastructure/Dependencies.cs.
       UseOnlyInMemoryDatabase: "true"
-      # Bind the web app to HTTP only on all interfaces so the agent
-      # can health-check it across the Docker network. No HTTPS certificate
-      # is configured; HttpsRedirectionMiddleware skips redirection when no
-      # HTTPS port is resolvable.
       ASPNETCORE_URLS: "http://0.0.0.0:5000"
-      # Development env loads appsettings.Development.json which sets:
-      #   Aspire.Seq.DisableHealthChecks=true (prevents Seq crash when no server)
-      #   Aspire.Seq.ServerUrl=http://localhost:5341 (satisfies AddSeqEndpoint validation)
-      # Override apiBase to HTTP so ApiHealthCheck can reach PublicApi without a dev cert.
       ASPNETCORE_ENVIRONMENT: "Development"
       baseUrls__apiBase: "http://localhost:5099/api/"
     mem_limit: 2g
@@ -53,12 +42,16 @@ services:
       retries: 3
       start_period: 10s
 
+  # NOTE: openhands is the legacy agent architecture; this stack is pending
+  # migration to opencode (nerv pattern). When migrated, openhands is removed
+  # and the worker gains an opencode entrypoint that reads from /run/secrets/groq_key.
+  # LLM_API_KEY intentionally absent — secret delivered via GROQ_KEY_FILE mount.
+  # Until migrated, this service is non-functional without a wrapper entrypoint.
   openhands:
     image: ghcr.io/all-hands-ai/openhands:latest
     container_name: "${RUN_ID}-eshoponweb-openhands"
     environment:
       - LLM_MODEL=${LLM_MODEL}
-      - LLM_API_KEY=${GROQ_API_KEY}
       - LLM_BASE_URL=${LLM_BASE_URL}
       - LLM_USE_JSON_MODE=true
       - OPENHANDS_ALWAYS_APPROVE=true

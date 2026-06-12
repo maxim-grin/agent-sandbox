@@ -28,6 +28,15 @@ REPO_URL="$(jq -r '.repo_url' "$JOB_SPEC")"
 COMMIT="$(jq -r '.commit // "main"' "$JOB_SPEC")"
 PROJECT_NAME="$(basename "$REPO_URL" .git)"
 
+# --- Input validation ---
+ALLOWED_TYPES=(nerv eshoponweb medplum)
+[[ " ${ALLOWED_TYPES[*]} " =~ " ${PROJECT_TYPE} " ]] \
+  || { echo "Error: unknown project_type '${PROJECT_TYPE}'. Allowed: ${ALLOWED_TYPES[*]}" >&2; exit 1; }
+[[ "$REPO_URL" =~ ^https://[a-zA-Z0-9._/:-]+$ ]] \
+  || { echo "Error: repo_url must be an https:// URL with safe chars: '${REPO_URL}'" >&2; exit 1; }
+[[ "$COMMIT" =~ ^[a-zA-Z0-9._/-]+$ ]] \
+  || { echo "Error: commit must contain only alphanumeric and ._/- chars: '${COMMIT}'" >&2; exit 1; }
+
 MOCK="${MOCK:-false}"
 MOCK_DIR="$(realpath "$SCRIPT_DIR/mock")"
 RUN_ID="sandbox-$(date +%s)"
@@ -56,11 +65,13 @@ else
   LLM_MODEL_ID="$RAW_MODEL"
 fi
 
+GROQ_KEY_FILE=""
+
 run_compose() {
   RUN_ID="$RUN_ID" SANDBOX_NETWORK="$NETWORK_NAME" LLM_NETWORK="$LLM_NETWORK" \
     RESULTS_VOLUME="$RESULTS_VOLUME" WORKSPACE_VOLUME="$WORKSPACE_VOLUME" \
-    OPENAI_API_KEY="${OPENAI_API_KEY:-}" LLM_BASE_URL="${LLM_BASE_URL:-}" \
-    GROQ_API_KEY="${GROQ_API_KEY:-}" \
+    LLM_BASE_URL="${LLM_BASE_URL:-}" \
+    GROQ_KEY_FILE="${GROQ_KEY_FILE}" \
     MOCK_DIR="${MOCK_DIR:-}" \
     docker compose "$@"
 }
@@ -76,6 +87,7 @@ cleanup() {
   docker network rm "$NETWORK_NAME" 2>/dev/null || true
   docker network rm "$LLM_NETWORK" 2>/dev/null || true
   docker volume rm "$RESULTS_VOLUME" "$WORKSPACE_VOLUME" 2>/dev/null || true
+  [[ -n "${GROQ_KEY_FILE:-}" ]] && rm -f "$GROQ_KEY_FILE"
 }
 trap cleanup EXIT
 
@@ -86,6 +98,18 @@ echo "[run_agent] Repo URL:     $REPO_URL"
 echo "[run_agent] Commit:       $COMMIT"
 echo "[run_agent] Mock:         $MOCK"
 echo "[run_agent] LLM:          $LLM_PROVIDER/$LLM_MODEL_ID"
+
+# --- API key secret file ---
+# Mode 0644: file is in /tmp with random name and deleted post-run.
+# World-readable so the non-root container user (UID 1001) can read it
+# via Docker standalone bind-mount (which applies host permissions).
+GROQ_KEY_FILE="$(mktemp)"
+chmod 0644 "$GROQ_KEY_FILE"
+if [[ "$MOCK" == "true" ]]; then
+  printf '%s' "mock" > "$GROQ_KEY_FILE"
+else
+  printf '%s' "${GROQ_API_KEY:-}" > "$GROQ_KEY_FILE"
+fi
 
 # --- Docker resources ---
 echo "[run_agent] Creating networks: $NETWORK_NAME, $LLM_NETWORK"
@@ -104,7 +128,6 @@ if [[ "$MOCK" == "true" ]]; then
     -v "$SCRIPT_DIR/mock/workspace:/fixture:ro" \
     alpine sh -c 'cp -r /fixture/. /workspace/'
   # Mock: openai provider pointing to mock-llm container
-  export OPENAI_API_KEY="mock"
   export LLM_BASE_URL="http://${RUN_ID}-mock-llm:8080/v1"
   LLM_PROVIDER="openai"
   LLM_MODEL_ID="gpt-4o-2024-08-06"
@@ -121,7 +144,7 @@ fi
 
 docker run --rm \
   -v "${WORKSPACE_VOLUME}:/workspace" \
-  alpine chmod -R 777 /workspace
+  alpine chown -R 1001:1001 /workspace
 
 # --- Start compose ---
 echo "[run_agent] Starting stack (provider: $LLM_PROVIDER, model: $LLM_MODEL_ID)..."

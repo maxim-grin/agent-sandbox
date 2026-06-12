@@ -95,10 +95,10 @@ Results in `run_results/nerv/<run-id>/result.json`.
 
 ### Mock mode
 
-`MOCK=true` swaps the LLM endpoint:
+`MOCK=true` swaps the LLM endpoint. The secret file is written with `"mock"` as the key value:
 
 ```
-OPENAI_API_KEY=mock
+# written to GROQ_KEY_FILE (tmpfile), read by entrypoint → OPENAI_API_KEY=mock
 OPENAI_BASE_URL=http://<run-id>-mock-llm:8080/v1
 LLM_PROVIDER=openai
 LLM_MODEL_ID=gpt-4o-2024-08-06
@@ -154,11 +154,14 @@ Stage 1 (current) result schema:
 
 ## Security
 
-- `cap_drop: ALL` on all containers — no Linux capability escalation
+- `cap_drop: ALL` + `no-new-privileges:true` on all containers
+- Worker runs as non-root `ocuser` (UID 1001) — LLM-driven code never executes as root
+- API key delivered via Docker secret (tmpfile, mode 0644, deleted post-run) — absent from `docker inspect` env
+- Workspace owned by `ocuser:ocgroup` (mode 755) — no world-writable paths
+- Input validation on `project_type`, `repo_url`, `commit` before any Docker operations
+- opencode serve binds to `127.0.0.1:4096` only — unreachable from other containers
 - No Docker socket in worker — cannot spawn containers
-- opencode serve binds to `127.0.0.1` only — not reachable from other containers
-- API key via env (prod: Docker secret via tmpfile mount)
-- Per-run networks and volumes — complete run isolation
+- Per-run networks and volumes — complete state isolation between runs
 
 ---
 
@@ -167,7 +170,7 @@ Stage 1 (current) result schema:
 Five things needed — see `CLAUDE.md` for full spec:
 
 1. `projects/<type>/worker/Dockerfile` — runtime + opencode binary
-2. `projects/<type>/worker/docker-entrypoint.sh` — `exec opencode serve --hostname 127.0.0.1 --port 4096`
+2. `projects/<type>/worker/docker-entrypoint.sh` — reads API key from `/run/secrets/groq_key`, then `exec opencode serve --hostname 127.0.0.1 --port 4096`
 3. `projects/<type>/docker-compose.yml` — worker + data services, external networks/volumes
 4. `projects/<type>/prompt.txt` — task prompt for Stage 1
 5. Add `"<type>"` to enum in `schemas/job_spec.schema.json`

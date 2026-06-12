@@ -9,28 +9,30 @@ FROM node:20-alpine AS runtime
 
 RUN apk add --no-cache git curl wget jq bash
 
-# opencode binary — install script writes to ~/.local/bin
-ENV PATH="/root/.opencode/bin:${PATH}"
+# opencode binary: install script writes to /root/.opencode/bin (root-only dir).
+# Copy binary to /usr/local/bin so non-root user can execute it.
 ENV SHELL=/bin/bash
-RUN curl -fsSL https://opencode.ai/install | bash
+RUN curl -fsSL https://opencode.ai/install | bash && \
+    cp /root/.opencode/bin/opencode /usr/local/bin/opencode && \
+    chmod 755 /usr/local/bin/opencode
 
-# opencode plugins: special-edition (reduce system prompt/tool tokens)
-RUN npm install -g @anthonyfangqing/opencode-special-edition \
-    && mkdir -p /root/.opencode \
-    && echo '{"plugin":["@anthonyfangqing/opencode-special-edition"]}' \
-       > /root/.opencode/opencode.json
+# opencode plugin installed globally; config written by entrypoint at runtime
+RUN npm install -g @anthonyfangqing/opencode-special-edition
+
+RUN addgroup -S -g 1001 ocgroup && adduser -S -u 1001 -G ocgroup -s /bin/sh ocuser
+
+RUN mkdir -p /workspace /workspace/.pipeline \
+    && chown -R ocuser:ocgroup /workspace
 
 COPY --from=toolchain /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=toolchain /usr/local/bin/tsc          /usr/local/bin/tsc
 COPY --from=toolchain /usr/local/bin/ts-node      /usr/local/bin/ts-node
 COPY --from=toolchain /usr/local/bin/ts-node-dev  /usr/local/bin/ts-node-dev
 
-RUN mkdir -p /workspace /workspace/.pipeline \
-    && chmod -R 777 /workspace
-
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+USER ocuser
 WORKDIR /workspace
 
 HEALTHCHECK --interval=5s --timeout=5s --retries=6 \

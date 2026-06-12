@@ -47,8 +47,13 @@ RUN <install runtime tools>
 
 FROM <runtime-image> AS runtime
 RUN apk add --no-cache git curl wget jq
-# install opencode binary
-RUN curl -fsSL https://opencode.ai/install | sh
+
+# Install opencode as root. The install script writes to /root/.opencode/bin/ which
+# is inaccessible to non-root users (/root is 700). Copy binary to /usr/local/bin.
+ENV SHELL=/bin/bash
+RUN curl -fsSL https://opencode.ai/install | bash && \
+    cp /root/.opencode/bin/opencode /usr/local/bin/opencode && \
+    chmod 755 /usr/local/bin/opencode
 
 RUN addgroup -S -g 1001 ocgroup && adduser -S -u 1001 -G ocgroup -s /bin/sh ocuser
 RUN mkdir -p /workspace /sandbox/results \
@@ -74,7 +79,19 @@ Reads API key from Docker secret, starts opencode serve.
 #!/bin/sh
 set -e
 
-export OPENAI_API_KEY=$(cat /run/secrets/groq_key)
+SECRET_FILE="/run/secrets/groq_key"
+if [ ! -f "$SECRET_FILE" ] || [ ! -s "$SECRET_FILE" ]; then
+  echo "[entrypoint] ERROR: API key secret missing or empty at $SECRET_FILE" >&2
+  exit 1
+fi
+export OPENAI_API_KEY
+OPENAI_API_KEY="$(cat "$SECRET_FILE")"
+
+# Write opencode config to home dir at runtime (not baked into image because
+# any tmpfs mount on ~/.opencode shadows the build-time file).
+mkdir -p /home/ocuser/.opencode
+# Customize opencode.json here if plugins are needed.
+
 exec opencode serve --hostname 127.0.0.1 --port 4096
 ```
 
