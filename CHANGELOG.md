@@ -1,6 +1,22 @@
 # Changelog
 
-## [Unreleased] — Stage 1 complete (mock); real Groq blocked pending Dev tier
+## [Unreleased] — Stage 3 complete (security hardening; mock + real Groq green)
+
+## Stage 3 — Security hardening
+
+- **Non-root worker**: `ocuser` (UID 1001) in nerv Dockerfile; opencode binary copied from `/root/.opencode/bin` to `/usr/local/bin` (root home is mode 700, inaccessible to non-root)
+- **API key via Docker secret**: tmpfile (mode 0644) mounted at `/run/secrets/groq_key`; entrypoint exports as `OPENAI_API_KEY` + `GROQ_API_KEY`; key absent from `docker inspect` env
+- **Workspace permissions**: `chown -R 1001:1001 /workspace` (mode 755) replacing `chmod -R 777`
+- **Input validation**: `project_type` allowlist, `repo_url` must be `^https://`, `commit` alphanumeric + `._/-`
+- **`THREATMODEL.md`**: 7 threats, mitigations, known gaps; `ARCHITECTURE.md` security model updated
+- `read_only: true` deferred — bun writes to `/root/.local` at startup regardless of current user
+
+Key discoveries:
+- opencode install script writes to `~/.opencode/bin/`; root home (`/root/`) has mode 700 — binary is inaccessible to non-root users; must copy to `/usr/local/bin/`
+- Docker standalone-mode secrets are bind-mounts; host file permissions apply inside container; non-root user requires `o+r` (mode 0644) on the secret file
+- Groq provider uses `GROQ_API_KEY`; OpenAI mock provider uses `OPENAI_API_KEY`; entrypoint must export both from the same secret file
+
+## Stage 1+2 — opencode migration + token tracking
 
 Migrated agent from openhands to opencode. `run_agent.sh` drives opencode serve via HTTP API. No agent container. No SSH.
 
@@ -8,11 +24,12 @@ Migrated agent from openhands to opencode. `run_agent.sh` drives opencode serve 
 - **run_agent.sh**: rewritten — `POST /session` → `POST /session/:id/prompt_async` (204) → poll `result.json`
 - **Mock LLM**: `scripts/mock/llm_server.py` — OpenAI Responses API SSE mock (opencode 1.17+ uses `/v1/responses` with `stream: true`, not `/v1/chat/completions`)
 - **Mock compose**: `scripts/mock/docker-compose.mock.yml` + `scripts/mock/workspace/` fixture
+- **Token stats**: `opencode stats --days 1` after result collected; merged into `result.json` as `session_tokens` + `session_cost`
 - **Limits**: `mem_limit` + `cpus` + `cap_drop: ALL` on all containers
-- **Plugin**: `@anthonyfangqing/opencode-special-edition` installed in worker image via `opencode.json`; reduces build agent system prompt + tool descriptions
+- **Plugin**: `@anthonyfangqing/opencode-special-edition` installed in worker image; reduces build agent system prompt + tool descriptions
 
 Key discoveries:
-- bash tool requires `{command, description}`; workspace needs `chmod 777` (`cap_drop: ALL` removes `CAP_DAC_OVERRIDE`); Docker Compose resolves relative paths in `-f overlay` relative to first file — use `${MOCK_DIR}` absolute path
+- bash tool requires `{command, description}`; Docker Compose resolves relative paths in `-f overlay` relative to first file — use `${MOCK_DIR}` absolute path
 - opencode uses Chat Completions format for Groq provider (`/v1/chat/completions`), Responses API for OpenAI provider (`/v1/responses`)
 - **Groq TPM accounting**: Groq TPM = `input_tokens + max_tokens`; opencode hardcodes `max_tokens: 32000`; actual input is ~600–3,200 tokens but Groq charges ~32,500–36,000 against TPM limit; free tier (12k TPM) cannot run opencode regardless of prompt size — Dev tier required
 

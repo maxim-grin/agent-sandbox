@@ -84,8 +84,9 @@ if [ ! -f "$SECRET_FILE" ] || [ ! -s "$SECRET_FILE" ]; then
   echo "[entrypoint] ERROR: API key secret missing or empty at $SECRET_FILE" >&2
   exit 1
 fi
-export OPENAI_API_KEY
-OPENAI_API_KEY="$(cat "$SECRET_FILE")"
+KEY="$(cat "$SECRET_FILE")"
+export OPENAI_API_KEY="$KEY"
+export GROQ_API_KEY="$KEY"
 
 # Write opencode config to home dir at runtime (not baked into image because
 # any tmpfs mount on ~/.opencode shadows the build-time file).
