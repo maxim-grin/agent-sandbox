@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 
-FROM node:20-alpine AS toolchain
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS toolchain
 
 RUN apk add --no-cache git curl
 RUN npm install -g typescript ts-node ts-node-dev 2>/dev/null
 
-FROM node:20-alpine AS runtime
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runtime
 
 RUN apk add --no-cache git curl wget jq bash
 
@@ -23,6 +23,8 @@ RUN addgroup -S -g 1001 ocgroup && adduser -S -u 1001 -G ocgroup -s /bin/sh ocus
 
 RUN mkdir -p /workspace /workspace/.pipeline \
     && chown -R ocuser:ocgroup /workspace
+RUN mkdir -p /home/ocuser/.opencode /home/ocuser/.local /root/.local \
+    && chown -R ocuser:ocgroup /home/ocuser
 
 COPY --from=toolchain /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=toolchain /usr/local/bin/tsc          /usr/local/bin/tsc
@@ -36,6 +38,6 @@ USER ocuser
 WORKDIR /workspace
 
 HEALTHCHECK --interval=5s --timeout=5s --retries=6 \
-  CMD wget -q -O /dev/null http://localhost:4096/global/health
+  CMD curl -sf -u opencode:${OPENCODE_SERVER_PASSWORD:-} http://localhost:4096/global/health > /dev/null
 
 CMD ["/usr/local/bin/docker-entrypoint.sh"]

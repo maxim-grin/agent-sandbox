@@ -66,6 +66,7 @@ else
 fi
 
 GROQ_KEY_FILE=""
+OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 16)"
 
 run_compose() {
   RUN_ID="$RUN_ID" SANDBOX_NETWORK="$NETWORK_NAME" LLM_NETWORK="$LLM_NETWORK" \
@@ -73,6 +74,7 @@ run_compose() {
     LLM_BASE_URL="${LLM_BASE_URL:-}" \
     GROQ_KEY_FILE="${GROQ_KEY_FILE}" \
     MOCK_DIR="${MOCK_DIR:-}" \
+    OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD}" \
     docker compose "$@"
 }
 
@@ -197,7 +199,8 @@ SESSION_PAYLOAD=$(jq -n \
   }')
 
 SESSION_RESP=$(docker exec "$WORKER_CONTAINER" \
-  curl -sf -X POST http://localhost:4096/session \
+  curl -sf -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+  -X POST http://localhost:4096/session \
   -H "Content-Type: application/json" \
   -d "$SESSION_PAYLOAD")
 SESSION_ID=$(echo "$SESSION_RESP" | jq -r '.id')
@@ -217,6 +220,7 @@ MSG_PAYLOAD=$(jq -n \
 echo "[run_agent] Sending task (async)..."
 HTTP_CODE=$(docker exec "$WORKER_CONTAINER" \
   curl -s -o /dev/null -w "%{http_code}" \
+  -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
   -X POST "http://localhost:4096/session/$SESSION_ID/prompt_async" \
   -H "Content-Type: application/json" \
   -d "$MSG_PAYLOAD" 2>&1 || echo "000")

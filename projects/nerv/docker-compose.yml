@@ -24,19 +24,22 @@ services:
       NPM_CONFIG_UPDATE_NOTIFIER: "false"
       OPENAI_BASE_URL: "${LLM_BASE_URL:-}"
       OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "${OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX:-4096}"
+      OPENCODE_SERVER_PASSWORD: "${OPENCODE_SERVER_PASSWORD}"
     secrets:
       - groq_key
     mem_limit: 2g
     cpus: 2.0
-    # read_only: true requires investigation — opencode (bun) writes to /root/.local
-    # at startup regardless of current user. Needs tmpfs on /root/.local or binary
-    # relocation before enabling. Tracked in design.md open questions.
+    read_only: true
+    tmpfs:
+      - /tmp:size=100m,mode=1777
+      - /home/ocuser:size=200m,uid=1001,gid=1001
+      - /root/.local:size=50m
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:4096/global/health"]
+      test: ["CMD-SHELL", "curl -sf -u opencode:$$OPENCODE_SERVER_PASSWORD http://localhost:4096/global/health > /dev/null"]
       interval: 5s
       timeout: 5s
       retries: 6
