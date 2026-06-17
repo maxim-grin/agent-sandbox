@@ -46,7 +46,7 @@ FROM <runtime-image> AS toolchain
 RUN <install runtime tools>
 
 FROM <runtime-image> AS runtime
-RUN apk add --no-cache git curl wget jq
+RUN apk add --no-cache git curl wget jq  # jq required by shared entrypoint for runtime config generation
 
 # Install opencode as root. The install script writes to /root/.opencode/bin/ which
 # is inaccessible to non-root users (/root is 700). Copy binary to /usr/local/bin.
@@ -60,6 +60,7 @@ RUN mkdir -p /workspace /sandbox/results \
     && chown -R ocuser:ocgroup /workspace /sandbox
 
 COPY --from=toolchain <tools> <dest>
+COPY opencode.json /etc/opencode/opencode.json
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
@@ -67,34 +68,16 @@ USER ocuser
 WORKDIR /workspace
 
 HEALTHCHECK --interval=5s --timeout=5s --retries=6 \
-  CMD wget -q -O /dev/null http://localhost:4096/global/health
+  CMD wget -q -O /dev/null http://${OPENCODE_HOST:-127.0.0.1}:${OPENCODE_PORT:-4096}/global/health
 CMD ["/usr/local/bin/docker-entrypoint.sh"]
 ```
 
 ### 2. `projects/<type>/worker/docker-entrypoint.sh`
 
-Reads API key from Docker secret, starts opencode serve.
-
-```bash
-#!/bin/sh
-set -e
-
-SECRET_FILE="/run/secrets/groq_key"
-if [ ! -f "$SECRET_FILE" ] || [ ! -s "$SECRET_FILE" ]; then
-  echo "[entrypoint] ERROR: API key secret missing or empty at $SECRET_FILE" >&2
-  exit 1
-fi
-KEY="$(cat "$SECRET_FILE")"
-export OPENAI_API_KEY="$KEY"
-export GROQ_API_KEY="$KEY"
-
-# Write opencode config to home dir at runtime (not baked into image because
-# any tmpfs mount on ~/.opencode shadows the build-time file).
-mkdir -p /home/ocuser/.opencode
-# Customize opencode.json here if plugins are needed.
-
-exec opencode serve --hostname 127.0.0.1 --port 4096
-```
+Copy from `projects/shared/docker-entrypoint.sh` — do not modify. Canonical source is `projects/shared/`.
+The shared entrypoint reads `/run/secrets/llm_key`, exports `OPENAI_API_KEY` (non-ollama), builds
+`/home/ocuser/.opencode/opencode.json` from `/etc/opencode/opencode.json` (base config via `cp` or `jq`),
+and starts `opencode serve --hostname ${OPENCODE_HOST:-127.0.0.1} --port ${OPENCODE_PORT:-4096}`.
 
 ### 3. `projects/<type>/docker-compose.yml`
 
@@ -116,16 +99,21 @@ services:
     environment:
       CI: "true"
       OPENAI_BASE_URL: "${LLM_BASE_URL}"
+      LLM_PROVIDER: "${LLM_PROVIDER:-}"
+      LLM_MODEL_ID: "${LLM_MODEL_ID:-}"
+      OLLAMA_HOST: "${OLLAMA_HOST:-http://host.docker.internal:11434}"
+      OPENCODE_PORT: "${OPENCODE_PORT:-4096}"
+      OPENCODE_HOST: "${OPENCODE_HOST:-127.0.0.1}"
       OPENCODE_SERVER_PASSWORD: "${OPENCODE_SERVER_PASSWORD}"
       # stack-specific env vars
     secrets:
-      - groq_key
+      - llm_key
     mem_limit: <Xg>
     cpus: <N>
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:4096/global/health"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://$$OPENCODE_HOST:$$OPENCODE_PORT/global/health"]
       interval: 5s
       timeout: 5s
       retries: 6
@@ -151,8 +139,8 @@ volumes:
     name: "${RESULTS_VOLUME}"
 
 secrets:
-  groq_key:
-    file: "${GROQ_KEY_FILE}"
+  llm_key:
+    file: "${LLM_KEY_FILE}"
 ```
 
 ### 4. `projects/<type>/commands/`

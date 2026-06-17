@@ -19,7 +19,7 @@ mkdir -p /home/ocuser/.opencode
 BASE_CONFIG="/etc/opencode/opencode.json"
 
 if [ "$LLM_PROVIDER" = "ollama" ]; then
-  MODEL_ID="${LLM_MODEL_ID:-gemma3:1b}"
+  MODEL_ID="${LLM_MODEL_ID:-qwen3:0.6b}"
   OLLAMA_BASE="${OLLAMA_HOST:-http://host.docker.internal:11434}"
   jq --arg model "$MODEL_ID" --arg base "${OLLAMA_BASE}/v1" \
     '. + {"provider": {"ollama": {"npm": "@ai-sdk/openai-compatible", "name": "Ollama", "options": {"baseURL": $base}, "models": {($model): {"name": $model, "tools": true, "options": {"think": false}}}}}}' \

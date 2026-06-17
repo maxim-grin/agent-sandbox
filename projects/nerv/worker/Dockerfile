@@ -31,6 +31,7 @@ COPY --from=toolchain /usr/local/bin/tsc          /usr/local/bin/tsc
 COPY --from=toolchain /usr/local/bin/ts-node      /usr/local/bin/ts-node
 COPY --from=toolchain /usr/local/bin/ts-node-dev  /usr/local/bin/ts-node-dev
 
+COPY opencode.json /etc/opencode/opencode.json
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
@@ -38,6 +39,6 @@ USER ocuser
 WORKDIR /workspace
 
 HEALTHCHECK --interval=5s --timeout=5s --retries=6 \
-  CMD curl -sf -u opencode:${OPENCODE_SERVER_PASSWORD:-} http://localhost:4096/global/health > /dev/null
+  CMD curl -sf -u opencode:${OPENCODE_SERVER_PASSWORD:-} http://${OPENCODE_HOST:-127.0.0.1}:${OPENCODE_PORT:-4096}/global/health > /dev/null
 
 CMD ["/usr/local/bin/docker-entrypoint.sh"]
