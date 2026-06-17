@@ -21,6 +21,7 @@ services:
     working_dir: /workspace
     environment:
       CI: "true"
+      LLM_PROVIDER: "${LLM_PROVIDER:-groq}"
       DOTNET_CLI_TELEMETRY_OPTOUT: "1"
       DOTNET_NOLOGO: "1"
       UseOnlyInMemoryDatabase: "true"

@@ -17,6 +17,7 @@ services:
     working_dir: /workspace
     environment:
       CI: "true"
+      LLM_PROVIDER: "${LLM_PROVIDER:-groq}"
       NODE_ENV: "test"
       MEDPLUM_DATABASE_HOST: postgres
       MEDPLUM_DATABASE_PORT: "5432"

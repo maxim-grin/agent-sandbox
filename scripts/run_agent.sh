@@ -16,10 +16,14 @@ JOB_SPEC="${1:-}"
 ENV_FILE="$REPO_ROOT/.env"
 if [[ -f "$ENV_FILE" ]]; then
   echo "[run_agent] Loading env: $ENV_FILE"
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
+  while IFS='=' read -r key value || [[ -n "$key" ]]; do
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${key// }" ]] && continue
+    key="${key%%[[:space:]]*}"
+    [[ -z "$key" ]] && continue
+    # Only set if not already in environment (CLI vars take precedence)
+    [[ -v "$key" ]] || export "$key=$value"
+  done < "$ENV_FILE"
 fi
 
 JOB_SPEC="$(realpath "$JOB_SPEC")"
@@ -65,6 +69,17 @@ else
   LLM_MODEL_ID="$RAW_MODEL"
 fi
 
+# Ollama: point opencode's built-in ollama provider at host; keep providerID "ollama"
+# (opencode's "openai" providerID uses /v1/responses — Ollama only supports /v1/chat/completions)
+if [[ "$LLM_PROVIDER" == "ollama" ]]; then
+  LLM_BASE_URL="http://host.docker.internal:11434/v1"
+  OLLAMA_HOST="http://host.docker.internal:11434"
+  OPENCODE_PROVIDER_ID="ollama"
+else
+  OLLAMA_HOST=""
+  OPENCODE_PROVIDER_ID="$LLM_PROVIDER"
+fi
+
 GROQ_KEY_FILE=""
 OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 16)"
 
@@ -72,6 +87,9 @@ run_compose() {
   RUN_ID="$RUN_ID" SANDBOX_NETWORK="$NETWORK_NAME" LLM_NETWORK="$LLM_NETWORK" \
     RESULTS_VOLUME="$RESULTS_VOLUME" WORKSPACE_VOLUME="$WORKSPACE_VOLUME" \
     LLM_BASE_URL="${LLM_BASE_URL:-}" \
+    LLM_PROVIDER="${LLM_PROVIDER:-groq}" \
+    LLM_MODEL_ID="${LLM_MODEL_ID:-}" \
+    OLLAMA_HOST="${OLLAMA_HOST:-}" \
     GROQ_KEY_FILE="${GROQ_KEY_FILE}" \
     MOCK_DIR="${MOCK_DIR:-}" \
     OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD}" \
@@ -109,8 +127,23 @@ GROQ_KEY_FILE="$(mktemp)"
 chmod 0644 "$GROQ_KEY_FILE"
 if [[ "$MOCK" == "true" ]]; then
   printf '%s' "mock" > "$GROQ_KEY_FILE"
+elif [[ "$LLM_PROVIDER" == "ollama" ]]; then
+  printf '%s' "ollama-local" > "$GROQ_KEY_FILE"
 else
   printf '%s' "${GROQ_API_KEY:-}" > "$GROQ_KEY_FILE"
+fi
+
+# --- Ollama pre-flight check ---
+if [[ "$LLM_PROVIDER" == "ollama" && "$MOCK" != "true" ]]; then
+  echo "[run_agent] Probing Ollama..."
+  if curl -sf --max-time 3 http://localhost:11434 > /dev/null 2>&1; then
+    echo "[run_agent] Ollama reachable at localhost:11434."
+  elif curl -sf --max-time 3 http://host.docker.internal:11434 > /dev/null 2>&1; then
+    echo "[run_agent] Ollama reachable at host.docker.internal:11434."
+  else
+    echo "[run_agent] ERROR: Ollama not reachable at localhost:11434 or host.docker.internal:11434. Start Ollama and retry." >&2
+    exit 1
+  fi
 fi
 
 # --- Docker resources ---
@@ -132,6 +165,7 @@ if [[ "$MOCK" == "true" ]]; then
   # Mock: openai provider pointing to mock-llm container
   export LLM_BASE_URL="http://${RUN_ID}-mock-llm:8080/v1"
   LLM_PROVIDER="openai"
+  OPENCODE_PROVIDER_ID="openai"
   LLM_MODEL_ID="gpt-4o-2024-08-06"
 else
   echo "[run_agent] Cloning $REPO_URL @ $COMMIT..."
@@ -184,7 +218,7 @@ fi
 # --- Create opencode session with auto-approve permissions ---
 echo "[run_agent] Creating opencode session..."
 SESSION_PAYLOAD=$(jq -n \
-  --arg providerID "$LLM_PROVIDER" \
+  --arg providerID "$OPENCODE_PROVIDER_ID" \
   --arg modelID "$LLM_MODEL_ID" \
   '{
     model: {id: $modelID, providerID: $providerID},
@@ -209,7 +243,7 @@ echo "[run_agent] Session ID: $SESSION_ID"
 # --- Send task via prompt_async (204, non-blocking) ---
 TASK="$(cat "$PROMPT_FILE")"
 MSG_PAYLOAD=$(jq -n \
-  --arg providerID "$LLM_PROVIDER" \
+  --arg providerID "$OPENCODE_PROVIDER_ID" \
   --arg modelID "$LLM_MODEL_ID" \
   --arg text "$TASK" \
   '{
