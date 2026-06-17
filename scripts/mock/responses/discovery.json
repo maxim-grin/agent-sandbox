@@ -1,0 +1,8 @@
+{
+  "install_cmd": "npm install",
+  "build_cmd": "npm run build",
+  "test_cmd": "npm test",
+  "start_cmd": "npm start",
+  "health_url": "http://localhost:3000/health",
+  "port": 3000
+}

@@ -1,0 +1,5 @@
+{
+  "status": "success",
+  "response_code": 200,
+  "logs": "> nerv@1.0.0 start\nServer listening on port 3000\nGET /health 200 OK"
+}

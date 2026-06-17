@@ -4,56 +4,76 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-STAGE="${1:-stage1}"
-
-echo "[test] Running pipeline — stage: $STAGE"
+echo "[test] Running pipeline (mock mode)..."
 
 START_TS=$(date +%s)
 MOCK=true "$SCRIPT_DIR/run_agent.sh" "${REPO_ROOT}/job_specs/nerv.json"
 
-# Find newest result.json written after we started
-LATEST_RESULT=$(find "$REPO_ROOT/run_results/nerv" -name "result.json" \
-  -newer "$SCRIPT_DIR/test_pipeline.sh" 2>/dev/null | sort -r | head -1 || true)
+# Find newest run directory written after we started
+LATEST_RUN_DIR=$(find "$REPO_ROOT/run_results/nerv" -mindepth 1 -maxdepth 1 -type d \
+  2>/dev/null | while read -r d; do
+    mtime=$(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo 0)
+    [[ "$mtime" -gt "$START_TS" ]] && echo "$d"
+  done | sort -r | head -1 || true)
 
-if [[ -z "$LATEST_RESULT" ]]; then
-  # Fallback: find any result.json modified after START_TS
-  LATEST_RESULT=$(find "$REPO_ROOT/run_results/nerv" -name "result.json" 2>/dev/null | \
-    while read -r f; do [[ $(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f") -gt $START_TS ]] && echo "$f"; done | head -1 || true)
-fi
-
-if [[ -z "$LATEST_RESULT" ]]; then
-  echo "[test] FAIL: no result.json found" >&2
+if [[ -z "$LATEST_RUN_DIR" ]]; then
+  echo "[test] FAIL: no run directory found under run_results/nerv" >&2
   exit 1
 fi
 
-echo "[test] Checking: $LATEST_RESULT"
-
-if ! jq . "$LATEST_RESULT" > /dev/null 2>&1; then
-  echo "[test] FAIL: result.json is not valid JSON" >&2
-  cat "$LATEST_RESULT" >&2
-  exit 1
-fi
-
-STATUS="$(jq -r '.status' "$LATEST_RESULT")"
-MESSAGE="$(jq -r '.message // ""' "$LATEST_RESULT")"
+echo "[test] Checking: $LATEST_RUN_DIR"
 
 FAILED=0
 
-if [[ "$STATUS" != "success" ]]; then
-  echo "[test] FAIL: status='$STATUS', expected 'success'" >&2
+# --- Assert result.json exists and is valid JSON ---
+RESULT="$LATEST_RUN_DIR/result.json"
+if [[ ! -f "$RESULT" ]]; then
+  echo "[test] FAIL: result.json missing" >&2
+  FAILED=1
+elif ! jq . "$RESULT" > /dev/null 2>&1; then
+  echo "[test] FAIL: result.json is not valid JSON" >&2
+  cat "$RESULT" >&2
   FAILED=1
 fi
 
-if [[ "$MESSAGE" != "hello from opencode" ]]; then
-  echo "[test] FAIL: message='$MESSAGE', expected 'hello from opencode'" >&2
-  FAILED=1
+# --- Assert result.json contains all four stage keys ---
+if [[ $FAILED -eq 0 ]]; then
+  for KEY in discovery build tests run; do
+    if ! jq -e ".$KEY" "$RESULT" > /dev/null 2>&1; then
+      echo "[test] FAIL: result.json missing key '$KEY'" >&2
+      FAILED=1
+    fi
+  done
+fi
+
+# --- Assert all four stage JSONs exist in logs/ ---
+for STAGE in discovery build tests run; do
+  STAGE_FILE="$LATEST_RUN_DIR/logs/${STAGE}.json"
+  if [[ ! -f "$STAGE_FILE" ]]; then
+    echo "[test] FAIL: stage JSON missing: logs/${STAGE}.json" >&2
+    FAILED=1
+  elif ! jq . "$STAGE_FILE" > /dev/null 2>&1; then
+    echo "[test] FAIL: logs/${STAGE}.json is not valid JSON" >&2
+    FAILED=1
+  else
+    echo "[test] OK: logs/${STAGE}.json"
+  fi
+done
+
+# --- Assert overall status is success ---
+if [[ $FAILED -eq 0 ]]; then
+  STATUS="$(jq -r '.status' "$RESULT")"
+  if [[ "$STATUS" != "success" ]]; then
+    echo "[test] FAIL: result.json status='$STATUS', expected 'success'" >&2
+    jq . "$RESULT" >&2
+    FAILED=1
+  fi
 fi
 
 if [[ $FAILED -eq 1 ]]; then
-  echo "[test] result.json:" >&2
-  jq . "$LATEST_RESULT" >&2
+  echo "[test] FAIL"
   exit 1
 fi
 
 echo "[test] PASS"
-echo "[test] status='$STATUS' message='$MESSAGE'"
+echo "[test] All four stage JSONs present and result.json aggregated correctly."

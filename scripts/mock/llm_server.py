@@ -1,16 +1,60 @@
 #!/usr/bin/env python3
 """OpenAI Responses API mock with SSE streaming (required by opencode ≥1.17).
 Handles POST /v1/responses with stream:true.
+Routes by pipeline stage name (discovery/build/tests/run) to fixture JSONs.
 """
+import base64
 import json
 import http.server
+import os
+import re
 import time
 
-WRITE_CMD = (
-    "printf '%s' "
-    "'{\"status\":\"success\",\"message\":\"hello from opencode\"}'"
-    " > /workspace/result.json && echo done"
-)
+RESPONSES_DIR = os.path.join(os.path.dirname(__file__), "responses")
+PIPELINE_STAGES = ("discovery", "build", "tests", "run")
+
+
+def _load_fixture(stage):
+    path = os.path.join(RESPONSES_DIR, f"{stage}.json")
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
+
+
+def _make_write_cmd(stage):
+    """Return bash command that writes fixture JSON to /workspace/.pipeline/<stage>.json."""
+    content = _load_fixture(stage)
+    if content is None:
+        content = json.dumps({"status": "success"})
+    b64 = base64.b64encode(content.encode()).decode()
+    return (
+        f"mkdir -p /workspace/.pipeline && "
+        f"printf '%s' '{b64}' | base64 -d > /workspace/.pipeline/{stage}.json && "
+        f"echo done"
+    )
+
+
+def _extract_stage(items):
+    """Detect pipeline stage from message content.
+
+    Each command prompt ends with 'Write /workspace/.pipeline/<stage>.json',
+    so the last occurrence of '.pipeline/<stage>.json' is the target stage.
+    """
+    all_text = ""
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content", "")
+        if isinstance(content, str):
+            all_text += content + " "
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") in ("input_text", "text"):
+                    all_text += part.get("text", "") + " "
+    matches = re.findall(r'\.pipeline/(discovery|build|tests|run)\.json', all_text)
+    return matches[-1] if matches else None
 
 
 def _has_tool_result(items):
@@ -134,7 +178,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         items = body.get("input", [])
         tools = body.get("tools", [])
         has_tool_result = _has_tool_result(items)
-        print(f"[mock-llm] /v1/responses tools={len(tools)} has_tool_result={has_tool_result}", flush=True)
+
+        stage = _extract_stage(items)
+        print(
+            f"[mock-llm] /v1/responses tools={len(tools)} has_tool_result={has_tool_result} "
+            f"stage={stage}",
+            flush=True,
+        )
 
         if not tools:
             # Title generation or other system call — return plain text
@@ -142,10 +192,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if has_tool_result:
-            self._sse(_make_text_events("Done. File written."))
-        else:
+            self._sse(_make_text_events(f"Done. {stage or 'file'} written."))
+            return
+
+        if stage in PIPELINE_STAGES:
             tool_name = _bash_tool_name(tools)
-            arguments = json.dumps({"command": WRITE_CMD, "description": "Write result.json"})
+            write_cmd = _make_write_cmd(stage)
+            arguments = json.dumps({"command": write_cmd, "description": f"Write {stage}.json"})
+            self._sse(_make_tool_call_events(tool_name, arguments))
+        else:
+            # Unknown command — generic fallback
+            tool_name = _bash_tool_name(tools)
+            arguments = json.dumps({"command": "echo 'done'", "description": "Generic fallback"})
             self._sse(_make_tool_call_events(tool_name, arguments))
 
     def _sse(self, events):
@@ -171,5 +229,5 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     server = http.server.HTTPServer(("0.0.0.0", 8080), Handler)
-    print("Mock LLM server on :8080 (SSE streaming)", flush=True)
+    print("Mock LLM server on :8080 (SSE streaming, per-stage routing)", flush=True)
     server.serve_forever()

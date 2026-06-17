@@ -41,6 +41,9 @@ ALLOWED_TYPES=(nerv eshoponweb medplum)
 [[ "$COMMIT" =~ ^[a-zA-Z0-9._/-]+$ ]] \
   || { echo "Error: commit must contain only alphanumeric and ._/- chars: '${COMMIT}'" >&2; exit 1; }
 
+COMMANDS_DIR="$REPO_ROOT/projects/$PROJECT_TYPE/commands"
+[[ -d "$COMMANDS_DIR" ]] || { echo "Error: no commands dir for project_type: $PROJECT_TYPE ($COMMANDS_DIR)" >&2; exit 1; }
+
 MOCK="${MOCK:-false}"
 MOCK_DIR="$(realpath "$SCRIPT_DIR/mock")"
 RUN_ID="sandbox-$(date +%s)"
@@ -52,9 +55,6 @@ HOST_RESULTS="$REPO_ROOT/run_results/$PROJECT_NAME/$RUN_ID"
 
 COMPOSE_FILE="$REPO_ROOT/projects/$PROJECT_TYPE/docker-compose.yml"
 [[ -f "$COMPOSE_FILE" ]] || { echo "Error: no compose file for project_type: $PROJECT_TYPE" >&2; exit 1; }
-
-PROMPT_FILE="$REPO_ROOT/projects/$PROJECT_TYPE/prompt.txt"
-[[ -f "$PROMPT_FILE" ]] || { echo "Error: no prompt file: $PROMPT_FILE" >&2; exit 1; }
 
 WORKER_CONTAINER="${RUN_ID}-${PROJECT_TYPE}-worker-1"
 MOCK_COMPOSE="$SCRIPT_DIR/mock/docker-compose.mock.yml"
@@ -71,6 +71,9 @@ fi
 OPENCODE_URL="http://${OPENCODE_HOST:-127.0.0.1}:${OPENCODE_PORT:-4096}"
 LLM_KEY_FILE=""
 OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 16)"
+
+TIMEOUT_STAGE="${TIMEOUT_STAGE:-180}"
+TIMEOUT_TOTAL="${TIMEOUT_TOTAL:-1800}"
 
 run_compose() {
   RUN_ID="$RUN_ID" SANDBOX_NETWORK="$NETWORK_NAME" LLM_NETWORK="$LLM_NETWORK" \
@@ -203,6 +206,12 @@ if [[ "$MOCK" == "true" ]]; then
   fi
 fi
 
+# --- Copy command files into worker ---
+echo "[run_agent] Copying command files to worker..."
+docker exec "$WORKER_CONTAINER" mkdir -p /workspace/.opencode/commands/
+docker cp "$COMMANDS_DIR/." "$WORKER_CONTAINER:/workspace/.opencode/commands/"
+echo "[run_agent] Commands installed: $(docker exec "$WORKER_CONTAINER" ls /workspace/.opencode/commands/ | tr '\n' ' ')"
+
 # --- Create opencode session with auto-approve permissions ---
 echo "[run_agent] Creating opencode session..."
 SESSION_PAYLOAD=$(jq -n \
@@ -228,53 +237,94 @@ SESSION_RESP=$(docker exec "$WORKER_CONTAINER" \
 SESSION_ID=$(echo "$SESSION_RESP" | jq -r '.id')
 echo "[run_agent] Session ID: $SESSION_ID"
 
-# --- Send task via prompt_async (204, non-blocking) ---
-TASK="$(cat "$PROMPT_FILE")"
-MSG_PAYLOAD=$(jq -n \
-  --arg providerID "$LLM_PROVIDER" \
-  --arg modelID "$LLM_MODEL_ID" \
-  --arg text "$TASK" \
-  '{
-    model: {providerID: $providerID, modelID: $modelID},
-    parts: [{type: "text", text: $text}]
-  }')
+# --- Run 4-stage command loop ---
+PIPELINE_START=$(date +%s)
+for STAGE in discovery build tests run; do
+  echo "[run_agent] ── Stage: $STAGE ──"
 
-echo "[run_agent] Sending task (async)..."
-HTTP_CODE=$(docker exec "$WORKER_CONTAINER" \
-  curl -s -o /dev/null -w "%{http_code}" \
-  -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
-  -X POST "${OPENCODE_URL}/session/$SESSION_ID/prompt_async" \
-  -H "Content-Type: application/json" \
-  -d "$MSG_PAYLOAD" 2>&1 || echo "000")
-echo "[run_agent] prompt_async response: HTTP $HTTP_CODE"
-if [[ "$HTTP_CODE" != "204" ]]; then
-  echo "[run_agent] Unexpected HTTP code (expected 204)." >&2
-fi
+  CMD_PAYLOAD=$(jq -n --arg cmd "$STAGE" '{"command": $cmd, "arguments": ""}')
 
-# --- Poll for result.json ---
-echo "[run_agent] Waiting for /workspace/result.json (up to ${TIMEOUT_STAGE:-180}s)..."
-DEADLINE=$(( $(date +%s) + ${TIMEOUT_STAGE:-180} ))
-while true; do
-  if docker exec "$WORKER_CONTAINER" test -f /workspace/result.json 2>/dev/null; then
-    echo "[run_agent] result.json found."
-    break
-  fi
-  if [[ $(date +%s) -gt $DEADLINE ]]; then
-    echo "[run_agent] Timeout waiting for result.json." >&2
-    echo "[run_agent] Worker logs:" >&2
-    docker logs "$WORKER_CONTAINER" 2>&1 | tail -40 >&2
-    if [[ "$MOCK" == "true" ]]; then
-      echo "[run_agent] Mock-LLM logs:" >&2
-      docker logs "${RUN_ID}-mock-llm" 2>&1 | tail -20 >&2
-    fi
+  HTTP_CODE=$(docker exec "$WORKER_CONTAINER" \
+    curl -s -o /dev/null -w "%{http_code}" \
+    -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+    -X POST "${OPENCODE_URL}/session/${SESSION_ID}/command" \
+    -H "Content-Type: application/json" \
+    -d "$CMD_PAYLOAD" 2>&1 || echo "000")
+  echo "[run_agent] Stage $STAGE command: HTTP $HTTP_CODE"
+
+  if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" && "$HTTP_CODE" != "204" ]]; then
+    echo "[run_agent] ERROR: Stage $STAGE failed with HTTP $HTTP_CODE." >&2
     exit 1
   fi
-  sleep 2
+
+  # Poll for stage JSON as completion signal
+  STAGE_JSON="/workspace/.pipeline/${STAGE}.json"
+  echo "[run_agent] Waiting for $STAGE_JSON (up to ${TIMEOUT_STAGE}s)..."
+  STAGE_DEADLINE=$(( $(date +%s) + TIMEOUT_STAGE ))
+  while true; do
+    if docker exec "$WORKER_CONTAINER" test -f "$STAGE_JSON" 2>/dev/null; then
+      echo "[run_agent] Stage $STAGE: $STAGE_JSON found."
+      break
+    fi
+    if [[ $(date +%s) -gt $STAGE_DEADLINE ]]; then
+      echo "[run_agent] ERROR: Timeout waiting for $STAGE_JSON." >&2
+      docker logs "$WORKER_CONTAINER" 2>&1 | tail -40 >&2
+      if [[ "$MOCK" == "true" ]]; then
+        docker logs "${RUN_ID}-mock-llm" 2>&1 | tail -20 >&2
+      fi
+      exit 1
+    fi
+    if [[ $(( $(date +%s) - PIPELINE_START )) -gt $TIMEOUT_TOTAL ]]; then
+      echo "[run_agent] ERROR: Total pipeline timeout exceeded." >&2
+      exit 1
+    fi
+    sleep 2
+  done
 done
 
-# --- Collect result ---
-mkdir -p "$HOST_RESULTS"
-docker exec "$WORKER_CONTAINER" cat /workspace/result.json > "$HOST_RESULTS/result.json"
+# --- Collect stage JSONs and aggregate ---
+echo "[run_agent] Aggregating stage results..."
+mkdir -p "$HOST_RESULTS/logs"
+
+MISSING=()
+for STAGE in discovery build tests run; do
+  if ! docker exec "$WORKER_CONTAINER" test -f "/workspace/.pipeline/${STAGE}.json" 2>/dev/null; then
+    MISSING+=("$STAGE")
+  fi
+done
+
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+  echo "[run_agent] ERROR: missing stage JSONs: ${MISSING[*]}" >&2
+  exit 1
+fi
+
+for STAGE in discovery build tests run; do
+  docker exec "$WORKER_CONTAINER" cat "/workspace/.pipeline/${STAGE}.json" > "$HOST_RESULTS/logs/${STAGE}.json"
+  echo "[run_agent] Collected $STAGE.json"
+done
+
+# Determine overall status from build, tests, run
+BUILD_STATUS=$(jq -r '.status // "unknown"' "$HOST_RESULTS/logs/build.json")
+TESTS_STATUS=$(jq -r '.status // "unknown"' "$HOST_RESULTS/logs/tests.json")
+RUN_STATUS=$(jq -r '.status // "unknown"' "$HOST_RESULTS/logs/run.json")
+OVERALL_STATUS="success"
+if [[ "$BUILD_STATUS" != "success" || "$TESTS_STATUS" != "success" || "$RUN_STATUS" != "success" ]]; then
+  OVERALL_STATUS="failure"
+fi
+
+DISCOVERY_JSON="$(cat "$HOST_RESULTS/logs/discovery.json")"
+BUILD_JSON="$(cat "$HOST_RESULTS/logs/build.json")"
+TESTS_JSON="$(cat "$HOST_RESULTS/logs/tests.json")"
+RUN_JSON="$(cat "$HOST_RESULTS/logs/run.json")"
+
+jq -n \
+  --arg status "$OVERALL_STATUS" \
+  --argjson discovery "$DISCOVERY_JSON" \
+  --argjson build "$BUILD_JSON" \
+  --argjson tests "$TESTS_JSON" \
+  --argjson run "$RUN_JSON" \
+  '{status: $status, discovery: $discovery, build: $build, tests: $tests, run: $run}' \
+  > "$HOST_RESULTS/result.json"
 
 # --- Collect token stats via opencode stats ---
 # Output uses box-drawing format: │Input   0 │, │Output  0 │, │Total Cost  $0.00 │

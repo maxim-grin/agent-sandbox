@@ -1,0 +1,6 @@
+{
+  "status": "success",
+  "passed": 12,
+  "failed": 0,
+  "logs": "> nerv@1.0.0 test\n> jest\n\nPASS src/app.test.ts\n\nTest Suites: 1 passed, 1 total\nTests:       12 passed, 12 total"
+}

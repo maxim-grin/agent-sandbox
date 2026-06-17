@@ -1,0 +1,5 @@
+{
+  "status": "success",
+  "exit_code": 0,
+  "logs": "added 42 packages in 2s\n> nerv@1.0.0 build\n> tsc\nBuild complete."
+}
