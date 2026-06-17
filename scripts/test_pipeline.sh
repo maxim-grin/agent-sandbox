@@ -60,6 +60,57 @@ for STAGE in discovery build tests run; do
   fi
 done
 
+# --- Assert field presence in each stage JSON ---
+if [[ $FAILED -eq 0 ]]; then
+  DISC="$LATEST_RUN_DIR/logs/discovery.json"
+  for FIELD in install_cmd build_cmd; do
+    if ! jq -e ".$FIELD | type == \"string\"" "$DISC" > /dev/null 2>&1; then
+      echo "[test] FAIL: discovery.json missing string field '$FIELD'" >&2
+      FAILED=1
+    else
+      echo "[test] OK: discovery.$FIELD"
+    fi
+  done
+
+  BUILD="$LATEST_RUN_DIR/logs/build.json"
+  if ! jq -e '.exit_code | type == "number"' "$BUILD" > /dev/null 2>&1; then
+    echo "[test] FAIL: build.json missing number field 'exit_code'" >&2
+    FAILED=1
+  else
+    echo "[test] OK: build.exit_code"
+  fi
+  if ! jq -e '.status == "success"' "$BUILD" > /dev/null 2>&1; then
+    echo "[test] FAIL: build.json status != 'success'" >&2
+    FAILED=1
+  else
+    echo "[test] OK: build.status"
+  fi
+
+  TESTS="$LATEST_RUN_DIR/logs/tests.json"
+  for FIELD in passed failed; do
+    if ! jq -e ".$FIELD | type == \"number\"" "$TESTS" > /dev/null 2>&1; then
+      echo "[test] FAIL: tests.json missing number field '$FIELD'" >&2
+      FAILED=1
+    else
+      echo "[test] OK: tests.$FIELD"
+    fi
+  done
+
+  RUN="$LATEST_RUN_DIR/logs/run.json"
+  if ! jq -e '.response_code | type == "number"' "$RUN" > /dev/null 2>&1; then
+    echo "[test] FAIL: run.json missing number field 'response_code'" >&2
+    FAILED=1
+  else
+    echo "[test] OK: run.response_code"
+  fi
+  if ! jq -e '.status == "success"' "$RUN" > /dev/null 2>&1; then
+    echo "[test] FAIL: run.json status != 'success'" >&2
+    FAILED=1
+  else
+    echo "[test] OK: run.status"
+  fi
+fi
+
 # --- Assert overall status is success ---
 if [[ $FAILED -eq 0 ]]; then
   STATUS="$(jq -r '.status' "$RESULT")"

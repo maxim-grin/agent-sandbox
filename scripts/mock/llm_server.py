@@ -36,14 +36,23 @@ def _make_write_cmd(stage):
     )
 
 
-def _extract_stage(items):
+def _extract_stage(body):
     """Detect pipeline stage from message content.
 
     Each command prompt ends with 'Write /workspace/.pipeline/<stage>.json',
     so the last occurrence of '.pipeline/<stage>.json' is the target stage.
+    Searches both the instructions field (system prompt) and the input array.
     """
-    all_text = ""
-    for item in items:
+    # instructions field holds the command file content (system prompt)
+    instructions = body.get("instructions", "")
+    if isinstance(instructions, str):
+        all_text = instructions + " "
+    elif isinstance(instructions, dict):
+        all_text = str(instructions.get("content", "")) + " "
+    else:
+        all_text = ""
+
+    for item in body.get("input", []):
         if not isinstance(item, dict):
             continue
         content = item.get("content", "")
@@ -62,6 +71,18 @@ def _has_tool_result(items):
         isinstance(i, dict) and i.get("type") == "function_call_output"
         for i in items
     )
+
+
+def _last_tool_call_stage(items):
+    """Return stage from arguments of most recent function_call in input, or None."""
+    last_args = None
+    for item in items:
+        if isinstance(item, dict) and item.get("type") == "function_call":
+            last_args = item.get("arguments", "")
+    if not last_args:
+        return None
+    matches = re.findall(r'\.pipeline/(discovery|build|tests|run)\.json', last_args)
+    return matches[-1] if matches else None
 
 
 def _bash_tool_name(tools):
@@ -175,14 +196,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"error": f"unknown path: {self.path}"})
             return
 
+        print(f"[mock-llm] keys={list(body.keys())}", flush=True)
+
         items = body.get("input", [])
         tools = body.get("tools", [])
         has_tool_result = _has_tool_result(items)
 
-        stage = _extract_stage(items)
+        stage = _extract_stage(body)
+        last_tool_stage = _last_tool_call_stage(items)
+        current_stage_done = has_tool_result and last_tool_stage == stage
         print(
             f"[mock-llm] /v1/responses tools={len(tools)} has_tool_result={has_tool_result} "
-            f"stage={stage}",
+            f"stage={stage} last_tool_stage={last_tool_stage} current_stage_done={current_stage_done}",
             flush=True,
         )
 
@@ -191,7 +216,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._sse(_make_text_events("Mock session title"))
             return
 
-        if has_tool_result:
+        if current_stage_done:
             self._sse(_make_text_events(f"Done. {stage or 'file'} written."))
             return
 

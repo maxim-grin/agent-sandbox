@@ -7,6 +7,7 @@ services:
     working_dir: /app
     volumes:
       - "${MOCK_DIR}/llm_server.py:/app/llm_server.py:ro"
+      - "${MOCK_DIR}/responses:/app/responses:ro"
     command: python /app/llm_server.py
     mem_limit: 128m
     cpus: 0.5

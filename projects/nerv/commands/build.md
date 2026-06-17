@@ -1,7 +1,6 @@
 ---
 description: Install dependencies and build
 model: openai/gpt-4o-2024-08-06
-subtask: true
 ---
 Discovery output:
 !cat /workspace/.pipeline/discovery.json
