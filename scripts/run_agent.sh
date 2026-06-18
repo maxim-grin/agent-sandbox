@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 usage() {
-  echo "Usage: [MOCK=true] run_agent.sh <job_spec.json>" >&2
+  echo "Usage: [MOCK=true|MOCK_LLM=true|MOCK_WORKSPACE=true] run_agent.sh <job_spec.json>" >&2
   exit 1
 }
 
@@ -45,6 +45,17 @@ COMMANDS_DIR="$REPO_ROOT/projects/$PROJECT_TYPE/commands"
 [[ -d "$COMMANDS_DIR" ]] || { echo "Error: no commands dir for project_type: $PROJECT_TYPE ($COMMANDS_DIR)" >&2; exit 1; }
 
 MOCK="${MOCK:-false}"
+MOCK_LLM="${MOCK_LLM:-false}"
+MOCK_WORKSPACE="${MOCK_WORKSPACE:-false}"
+if [[ "$MOCK" == "true" ]]; then
+  MOCK_LLM="true"
+  MOCK_WORKSPACE="true"
+fi
+# Set mock LLM defaults before provider validation so validation passes without real keys
+if [[ "$MOCK_LLM" == "true" ]]; then
+  : "${LLM_PROVIDER:=openai}"
+  : "${LLM_MODEL_ID:=gpt-4o-2024-08-06}"
+fi
 MOCK_DIR="$(realpath "$SCRIPT_DIR/mock")"
 RUN_ID="sandbox-$(date +%s)"
 NETWORK_NAME="$RUN_ID"
@@ -86,13 +97,14 @@ run_compose() {
     OPENCODE_PORT="${OPENCODE_PORT:-4096}" \
     LLM_KEY_FILE="${LLM_KEY_FILE}" \
     MOCK_DIR="${MOCK_DIR:-}" \
+    MOCK_WORKSPACE="${MOCK_WORKSPACE}" \
     OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD}" \
     docker compose "$@"
 }
 
 compose_down() {
   local args=(-p "${RUN_ID}-${PROJECT_TYPE}" -f "$COMPOSE_FILE")
-  [[ "$MOCK" == "true" ]] && args+=(-f "$MOCK_COMPOSE")
+  [[ "$MOCK_LLM" == "true" ]] && args+=(-f "$MOCK_COMPOSE")
   run_compose "${args[@]}" down -v 2>/dev/null || true
 }
 
@@ -105,13 +117,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[run_agent] Run ID:       $RUN_ID"
-echo "[run_agent] Project type: $PROJECT_TYPE"
-echo "[run_agent] Project name: $PROJECT_NAME"
-echo "[run_agent] Repo URL:     $REPO_URL"
-echo "[run_agent] Commit:       $COMMIT"
-echo "[run_agent] Mock:         $MOCK"
-echo "[run_agent] LLM:          $LLM_PROVIDER/$LLM_MODEL_ID"
+echo "[run_agent] Run ID:        $RUN_ID"
+echo "[run_agent] Project type:  $PROJECT_TYPE"
+echo "[run_agent] Project name:  $PROJECT_NAME"
+echo "[run_agent] Repo URL:      $REPO_URL"
+echo "[run_agent] Commit:        $COMMIT"
+echo "[run_agent] MOCK_LLM:      $MOCK_LLM"
+echo "[run_agent] MOCK_WORKSPACE:$MOCK_WORKSPACE"
+echo "[run_agent] LLM:           $LLM_PROVIDER/$LLM_MODEL_ID"
 
 # --- API key secret file ---
 # Mode 0644: file is in /tmp with random name and deleted post-run.
@@ -119,7 +132,7 @@ echo "[run_agent] LLM:          $LLM_PROVIDER/$LLM_MODEL_ID"
 # via Docker standalone bind-mount (which applies host permissions).
 LLM_KEY_FILE="$(mktemp)"
 chmod 0644 "$LLM_KEY_FILE"
-if [[ "$MOCK" == "true" ]]; then
+if [[ "$MOCK_LLM" == "true" ]]; then
   printf '%s' "mock" > "$LLM_KEY_FILE"
 elif [[ "$LLM_PROVIDER" == "ollama" ]]; then
   printf '%s' "ollama-local" > "$LLM_KEY_FILE"
@@ -128,7 +141,7 @@ else
 fi
 
 # --- Ollama pre-flight check ---
-if [[ "$LLM_PROVIDER" == "ollama" && "$MOCK" != "true" ]]; then
+if [[ "$LLM_PROVIDER" == "ollama" && "$MOCK_LLM" != "true" ]]; then
   echo "[run_agent] Probing Ollama at $OLLAMA_HOST..."
   if curl -sf --max-time 3 "$OLLAMA_HOST" > /dev/null 2>&1; then
     echo "[run_agent] Ollama reachable at $OLLAMA_HOST."
@@ -147,17 +160,13 @@ echo "[run_agent] Creating volumes: $RESULTS_VOLUME, $WORKSPACE_VOLUME"
 docker volume create "$RESULTS_VOLUME"
 docker volume create "$WORKSPACE_VOLUME"
 
-# --- Workspace + LLM setup ---
-if [[ "$MOCK" == "true" ]]; then
-  echo "[run_agent] Mock mode: copying fixture workspace..."
+# --- Workspace setup ---
+if [[ "$MOCK_WORKSPACE" == "true" ]]; then
+  echo "[run_agent] Mock workspace: copying fixture..."
   docker run --rm \
     -v "${WORKSPACE_VOLUME}:/workspace" \
     -v "$SCRIPT_DIR/mock/workspace:/fixture:ro" \
     alpine sh -c 'cp -r /fixture/. /workspace/'
-  # Mock: openai provider pointing to mock-llm container
-  export LLM_BASE_URL="http://${RUN_ID}-mock-llm:8080/v1"
-  LLM_PROVIDER="openai"
-  LLM_MODEL_ID="gpt-4o-2024-08-06"
 else
   echo "[run_agent] Cloning $REPO_URL @ $COMMIT..."
   docker run --rm \
@@ -169,6 +178,13 @@ else
          sh -c "git clone '$REPO_URL' /workspace && git -C /workspace checkout '$COMMIT'"
 fi
 
+# --- LLM routing ---
+if [[ "$MOCK_LLM" == "true" ]]; then
+  export LLM_BASE_URL="http://${RUN_ID}-mock-llm:8080/v1"
+  LLM_PROVIDER="openai"
+  LLM_MODEL_ID="gpt-4o-2024-08-06"
+fi
+
 docker run --rm \
   -v "${WORKSPACE_VOLUME}:/workspace" \
   alpine chown -R 1001:1001 /workspace
@@ -176,7 +192,7 @@ docker run --rm \
 # --- Start compose ---
 echo "[run_agent] Starting stack (provider: $LLM_PROVIDER, model: $LLM_MODEL_ID)..."
 COMPOSE_ARGS=(-p "${RUN_ID}-${PROJECT_TYPE}" -f "$COMPOSE_FILE")
-[[ "$MOCK" == "true" ]] && COMPOSE_ARGS+=(-f "$MOCK_COMPOSE")
+[[ "$MOCK_LLM" == "true" ]] && COMPOSE_ARGS+=(-f "$MOCK_COMPOSE")
 
 run_compose "${COMPOSE_ARGS[@]}" up -d
 
@@ -195,8 +211,8 @@ while true; do
   sleep 3
 done
 
-# --- Verify worker → mock-llm connectivity (mock mode) ---
-if [[ "$MOCK" == "true" ]]; then
+# --- Verify worker → mock-llm connectivity (mock LLM mode) ---
+if [[ "$MOCK_LLM" == "true" ]]; then
   MOCK_HOST="${RUN_ID}-mock-llm"
   echo "[run_agent] Testing worker → mock-llm connectivity..."
   if docker exec "$WORKER_CONTAINER" wget -q -O /dev/null "http://${MOCK_HOST}:8080/health" 2>/dev/null; then
@@ -220,12 +236,13 @@ SESSION_PAYLOAD=$(jq -n \
   '{
     model: {id: $modelID, providerID: $providerID},
     permission: [
-      {permission: "bash",  pattern: ".*", action: "allow"},
-      {permission: "edit",  pattern: ".*", action: "allow"},
-      {permission: "write", pattern: ".*", action: "allow"},
-      {permission: "read",  pattern: ".*", action: "allow"},
-      {permission: "glob",  pattern: ".*", action: "allow"},
-      {permission: "grep",  pattern: ".*", action: "allow"}
+      {permission: "bash",               pattern: ".*", action: "allow"},
+      {permission: "edit",               pattern: ".*", action: "allow"},
+      {permission: "write",              pattern: ".*", action: "allow"},
+      {permission: "read",               pattern: ".*", action: "allow"},
+      {permission: "glob",               pattern: ".*", action: "allow"},
+      {permission: "grep",               pattern: ".*", action: "allow"},
+      {permission: "external_directory", pattern: ".*", action: "allow"}
     ]
   }')
 
@@ -269,7 +286,7 @@ for STAGE in discovery build tests run; do
     if [[ $(date +%s) -gt $STAGE_DEADLINE ]]; then
       echo "[run_agent] ERROR: Timeout waiting for $STAGE_JSON." >&2
       docker logs "$WORKER_CONTAINER" 2>&1 | tail -40 >&2
-      if [[ "$MOCK" == "true" ]]; then
+      if [[ "$MOCK_LLM" == "true" ]]; then
         docker logs "${RUN_ID}-mock-llm" 2>&1 | tail -20 >&2
       fi
       exit 1

@@ -4,10 +4,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo "[test] Running pipeline (mock mode)..."
+MOCK_LLM="${MOCK_LLM:-false}"
 
-START_TS=$(date +%s)
-MOCK=true "$SCRIPT_DIR/run_agent.sh" "${REPO_ROOT}/job_specs/nerv.json"
+if [[ "$MOCK_LLM" == "true" ]]; then
+  echo "[test] Running pipeline (mock LLM, real workspace)..."
+  START_TS=$(date +%s)
+  MOCK_LLM=true "$SCRIPT_DIR/run_agent.sh" "${REPO_ROOT}/job_specs/nerv.json"
+else
+  echo "[test] Running pipeline (fixture mock mode)..."
+  START_TS=$(date +%s)
+  MOCK=true "$SCRIPT_DIR/run_agent.sh" "${REPO_ROOT}/job_specs/nerv.json"
+fi
 
 # Find newest run directory written after we started
 LATEST_RUN_DIR=$(find "$REPO_ROOT/run_results/nerv" -mindepth 1 -maxdepth 1 -type d \
@@ -95,6 +102,15 @@ if [[ $FAILED -eq 0 ]]; then
       echo "[test] OK: tests.$FIELD"
     fi
   done
+  if [[ "$MOCK_LLM" == "true" ]]; then
+    PASSED_COUNT=$(jq -r '.passed // 0' "$TESTS")
+    if [[ "$PASSED_COUNT" -le 0 ]]; then
+      echo "[test] FAIL: tests.json passed=$PASSED_COUNT, expected >0 for real Vitest run" >&2
+      FAILED=1
+    else
+      echo "[test] OK: tests.passed=$PASSED_COUNT (real run)"
+    fi
+  fi
 
   RUN="$LATEST_RUN_DIR/logs/run.json"
   if ! jq -e '.response_code | type == "number"' "$RUN" > /dev/null 2>&1; then

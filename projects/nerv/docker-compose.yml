@@ -20,6 +20,7 @@ services:
     environment:
       CI: "true"
       NODE_ENV: "test"
+      PORT: "3000"
       REDIS_URL: "redis://redis:6379"
       NPM_CONFIG_UPDATE_NOTIFIER: "false"
       OPENAI_BASE_URL: "${LLM_BASE_URL:-}"
@@ -37,7 +38,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=100m,mode=1777
-      - /home/ocuser:size=200m,uid=1001,gid=1001
+      - /home/ocuser:size=1g,uid=1001,gid=1001
       - /root/.local:size=50m
     security_opt:
       - no-new-privileges:true
