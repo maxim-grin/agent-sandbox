@@ -14,7 +14,7 @@ AI Agent Pipeline — version as of security-hardening change (2026-06-12).
 
 | Asset | Value | Location |
 |-------|-------|----------|
-| LLM API key (GROQ_API_KEY) | High — billable credential with external API access | Host env var → tmpfile → Docker secret |
+| LLM API key (LLM_API_KEY) | High — billable credential with external API access | Host env var → tmpfile → Docker secret |
 | Cloned repo code | Low — untrusted by design | workspace volume |
 | Pipeline result output | Medium — build/test status, logs | `run_results/` on host |
 | Host filesystem | High | Outside containers |
@@ -56,7 +56,7 @@ The worker container is the trust boundary. Everything inside it — repo code, 
 
 **Threat:** Process inside container reads `OPENAI_API_KEY` from `/proc/1/environ` or `docker inspect`.
 
-**Mitigation:** API key is NOT in container environment. It is read from `/run/secrets/groq_key` by the entrypoint and exported only to the `opencode` process. Other processes forked by the LLM agent (bash, npm, etc.) inherit the env, but the API key is `OPENAI_API_KEY=<value>` — not `GROQ_API_KEY`. The key is only useful for the LLM endpoint (which the attacker already has access to via the llm network from within the container). `docker inspect` shows no keys.
+**Mitigation:** API key is NOT in container environment. It is read from `/run/secrets/llm_key` by the entrypoint and exported only to the `opencode` process. Other processes forked by the LLM agent (bash, npm, etc.) inherit the env, but the API key is `OPENAI_API_KEY=<value>` — not `GROQ_API_KEY`. The key is only useful for the LLM endpoint (which the attacker already has access to via the llm network from within the container). `docker inspect` shows no keys.
 
 **Residual risk:** `OPENAI_API_KEY` is still in the process environment and readable from `/proc` by any process in the container as UID 1001. An attacker with code execution inside the container can read it. Full mitigation requires in-process secret handling (not bash entrypoint).
 

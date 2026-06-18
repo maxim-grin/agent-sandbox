@@ -9,10 +9,10 @@ Docker sandbox where an opencode LLM agent autonomously builds, tests, and runs 
 ```
 run_agent.sh (host)
   ↓  docker exec curl  →  opencode serve (worker container, 127.0.0.1:4096)
-                           ↓ LLM calls (Groq / mock)
+                           ↓ LLM calls (Groq / Ollama / mock)
                            ↓ bash tool executions
-                           ↓ writes /workspace/result.json
-  ↑  polls /workspace/result.json until present
+                           ↓ writes /workspace/.pipeline/<stage>.json
+  ↑  polls /workspace/.pipeline/<stage>.json per stage
 ```
 
 One container per run: **worker** (project runtime + opencode binary). No agent container. No SSH. `run_agent.sh` drives stages via HTTP API calls into the worker.
@@ -22,11 +22,11 @@ One container per run: **worker** (project runtime + opencode binary). No agent 
 ```
 projects/
 ├── nerv/        Node 20 + Redis
-├── medplum/     Node 22 + PostgreSQL + Redis      (planned)
-└── eshoponweb/  .NET SDK 10                       (planned)
+├── medplum/     Node 22 + PostgreSQL + Redis
+└── eshoponweb/  .NET SDK 10
 ```
 
-Each project: `docker-compose.yml` + `worker/Dockerfile` + `prompt.txt`.
+Each project: `docker-compose.yml` + `worker/Dockerfile` + `commands/` (4 stage files: discovery, build, tests, run).
 
 ---
 
@@ -41,17 +41,20 @@ Each project: `docker-compose.yml` + `worker/Dockerfile` + `prompt.txt`.
 ### 1. Configure
 
 ```bash
-cp .example.env .env
-# edit .env — set GROQ_API_KEY
+cp .env.example .env
+# edit .env — set LLM_API_KEY
 ```
 
 `.env` fields:
 
 ```bash
-LLM_MODEL=groq/llama-3.3-70b-versatile   # format: providerID/modelID
-GROQ_API_KEY=gsk_...
+LLM_PROVIDER=groq
+LLM_MODEL_ID=llama-3.3-70b-versatile
+LLM_API_KEY=gsk_...
 LLM_BASE_URL=https://api.groq.com/openai/v1
 ```
+
+**Ollama (local):** Set `LLM_PROVIDER=ollama`, `LLM_MODEL_ID=<model>`. `LLM_BASE_URL` is derived automatically from `OLLAMA_HOST` (default: `http://host.docker.internal:11434`). No `LLM_API_KEY` required.
 
 ### 2. Build worker image (first run only)
 
@@ -66,6 +69,13 @@ docker build -t ai-sandbox-nerv-worker projects/nerv/worker/
 ```bash
 MOCK=true ./scripts/run_agent.sh job_specs/nerv.json
 ```
+
+`MOCK=true` sets both `MOCK_LLM=true` and `MOCK_WORKSPACE=true`. Use granular flags independently:
+
+| Flag | Effect |
+|------|--------|
+| `MOCK_LLM=true` | Skips real LLM; routes to local mock server |
+| `MOCK_WORKSPACE=true` | Skips repo clone; uses fixture workspace |
 
 **Real LLM** — uses Groq API:
 
@@ -89,27 +99,20 @@ Results in `run_results/nerv/<run-id>/result.json`.
    — mock mode: also start `scripts/mock/docker-compose.mock.yml` (mock LLM server)
 5. Wait for worker healthcheck (`GET /global/health → {healthy:true}`)
 6. `POST /session` → session ID (with auto-approve permission rules)
-7. `POST /session/:id/prompt_async` → 204, task runs async
-8. Poll `/workspace/result.json` until present (default 180s timeout)
-9. Collect result, tear down
+7. `POST /session/:id/command { command: "<stage>" }` → 200/201/204, stage runs; repeat for each of 4 stages
+8. Poll `/workspace/.pipeline/<stage>.json` until present (`TIMEOUT_STAGE` deadline per stage, `TIMEOUT_TOTAL` overall)
+9. Collect per-stage JSONs via `docker exec cat`, aggregate → `result.json`; tear down
 
 ### Mock mode
 
-`MOCK=true` swaps the LLM endpoint. The secret file is written with `"mock"` as the key value:
-
-```
-# written to GROQ_KEY_FILE (tmpfile), read by entrypoint → OPENAI_API_KEY=mock
-OPENAI_BASE_URL=http://<run-id>-mock-llm:8080/v1
-LLM_PROVIDER=openai
-LLM_MODEL_ID=gpt-4o-2024-08-06
-```
+`MOCK_LLM=true` starts a mock LLM compose service (`scripts/mock/docker-compose.mock.yml`) and points `LLM_BASE_URL` at it. `MOCK_WORKSPACE=true` copies the fixture workspace (`scripts/mock/workspace/`) instead of cloning a real repo.
 
 Mock server (`scripts/mock/llm_server.py`) implements OpenAI Responses API with SSE streaming:
 
 | Request | Response |
 |---------|----------|
 | No tools (title gen) | Text SSE: "Mock session title" |
-| Tools, no prior result | Function call SSE: `bash` → writes `result.json` |
+| Tools, no prior stage result | Function call SSE: `bash` → writes `/workspace/.pipeline/<stage>.json` |
 | Tools + tool result | Text SSE: "Done." |
 
 ---
@@ -141,12 +144,17 @@ run_results/
         └── result.json
 ```
 
-Stage 1 (current) result schema:
+Result schema:
 
 ```json
 {
-  "status": "success",
-  "message": "hello from opencode"
+  "status": "success|failure",
+  "discovery": { "status": "...", "logs": "..." },
+  "build":     { "status": "...", "exit_code": 0, "logs": "..." },
+  "tests":     { "status": "...", "passed": 0, "failed": 0, "logs": "..." },
+  "run":       { "status": "...", "response_code": 200, "logs": "..." },
+  "session_tokens": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0 },
+  "session_cost": 0.0
 }
 ```
 
@@ -170,9 +178,9 @@ Stage 1 (current) result schema:
 Five things needed — see `CLAUDE.md` for full spec:
 
 1. `projects/<type>/worker/Dockerfile` — runtime + opencode binary
-2. `projects/<type>/worker/docker-entrypoint.sh` — reads API key from `/run/secrets/groq_key`, then `exec opencode serve --hostname 127.0.0.1 --port 4096`
+2. `projects/<type>/worker/docker-entrypoint.sh` — copy from `projects/shared/docker-entrypoint.sh`; reads API key from `/run/secrets/llm_key`, exports as `OPENAI_API_KEY`, then `exec opencode serve --hostname 127.0.0.1 --port 4096`
 3. `projects/<type>/docker-compose.yml` — worker + data services, external networks/volumes
-4. `projects/<type>/prompt.txt` — task prompt for Stage 1
+4. `projects/<type>/commands/` — 4 stage command files: `discovery.md`, `build.md`, `tests.md`, `run.md`; each with `subtask: true` frontmatter
 5. Add `"<type>"` to enum in `schemas/job_spec.schema.json`
 
 Worker container **must** be named `${RUN_ID}-<type>-worker-1`.
@@ -183,6 +191,7 @@ Worker container **must** be named `${RUN_ID}-<type>-worker-1`.
 
 | Variable | Default | Controls |
 |----------|---------|----------|
-| `TIMEOUT_STAGE` | `180s` | Poll deadline for `result.json` |
+| `TIMEOUT_STAGE` | `180s` | Poll deadline per stage (waits for `/workspace/.pipeline/<stage>.json`) |
+| `TIMEOUT_TOTAL` | `1800s` | Overall run deadline (wraps all 4 stages) |
 
-Set via env before running: `TIMEOUT_STAGE=300 ./scripts/run_agent.sh job_specs/nerv.json`
+Set via env before running: `TIMEOUT_STAGE=300 TIMEOUT_TOTAL=3600 ./scripts/run_agent.sh job_specs/nerv.json`

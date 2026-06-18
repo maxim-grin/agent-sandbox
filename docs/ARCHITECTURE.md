@@ -29,8 +29,7 @@ sequenceDiagram
         W->>L: LLM API calls (Groq via llm network)
         W->>W: execute bash tools in /workspace
         W->>W: write /workspace/.pipeline/<stage>.json
-        R->>W: docker exec curl POST /session/:id/command { command: tokenscope }
-        R->>R: collect token/cost data
+        R->>R: docker exec opencode stats --days 1 → collect token/cost data
     end
     R->>W: docker exec cat /workspace/.pipeline/*.json
     R->>R: jq-aggregate → result.json
@@ -100,10 +99,10 @@ Shell injection (`!cat /workspace/.pipeline/<stage>.json`) pulls prior stage out
 |-----------|---------------|
 | `run_agent.sh` | Load `.env`; create networks + volumes; clone repo; start compose; wait for worker healthy; copy commands; create session; run 4-stage loop via HTTP API; aggregate results; teardown |
 | `projects/<type>/worker/Dockerfile` | Project runtime + opencode binary (copied to `/usr/local/bin/`). Non-root `ocuser` (UID 1001). |
-| `projects/<type>/worker/docker-entrypoint.sh` | Reads API key from `/run/secrets/groq_key`, exports as `OPENAI_API_KEY`, writes opencode config, then exec `opencode serve --hostname 127.0.0.1 --port 4096` |
+| `projects/<type>/worker/docker-entrypoint.sh` | Reads API key from `/run/secrets/llm_key`, exports as `OPENAI_API_KEY`, writes opencode config, then exec `opencode serve --hostname 127.0.0.1 --port 4096` |
 | `projects/<type>/docker-compose.yml` | Worker + data services; declares external networks + volumes; no agent service |
 | `projects/<type>/commands/*.md` | Per-stage opencode command files with frontmatter (`subtask: true`, `model`) and shell injection |
-| `.example.env` / `.env` | LLM credentials: `LLM_MODEL`, `GROQ_API_KEY`, `LLM_BASE_URL` |
+| `.env.example` / `.env` | LLM credentials: `LLM_PROVIDER`, `LLM_MODEL_ID`, `LLM_API_KEY`, `LLM_BASE_URL` |
 | `scripts/mock/llm_server.py` | OpenAI-compat mock LLM — returns canned responses for testing without real API calls |
 | `scripts/test_pipeline.sh` | TDD test runner — runs pipeline with `MOCK=true`, asserts result.json shape |
 
@@ -136,7 +135,7 @@ Data services join sandbox only. Worker joins both.
 |---------|---------------|--------|
 | Docker socket | Not mounted on any container | ✅ |
 | Code execution user | `ocuser` UID 1001 (nerv); `sandboxuser` UID 1001 (eshoponweb, medplum) | ✅ |
-| API key | Docker secret — tmpfile (mode 0644), mounted at `/run/secrets/groq_key`, deleted post-run. Absent from `docker inspect` env. | ✅ |
+| API key | Docker secret — tmpfile (mode 0644), mounted at `/run/secrets/llm_key`, deleted post-run. Absent from `docker inspect` env. | ✅ |
 | Server auth | `OPENCODE_SERVER_PASSWORD` per-run env var (ephemeral, not an external credential) | ✅ |
 | Input validation | `project_type` allowlist; `repo_url` must be `^https://`; `commit` alphanumeric + `._/-` only | ✅ |
 | opencode serve bind | `127.0.0.1` only — not reachable from other containers on same network | ✅ |
@@ -144,7 +143,7 @@ Data services join sandbox only. Worker joins both.
 | Workspace permissions | `chown -R 1001:1001 /workspace` (mode 755) — no world-writable paths | ✅ |
 | Read-only rootfs | Deferred — opencode (bun) writes to `/root/.local` at startup; needs binary relocation | ⏳ |
 | Resource limits | `mem_limit` + `cpus` on all containers | ✅ |
-| Run timeout | `TIMEOUT_STAGE` (default 180s) polls for result.json | ✅ |
+| Run timeout | `TIMEOUT_STAGE` (default 180s) per stage; `TIMEOUT_TOTAL` (default 1800s) overall | ✅ |
 
 ---
 
@@ -178,19 +177,12 @@ run_results/<project_name>/<run_id>/
 
 ```json
 {
-  "status": "success | failure",
+  "status": "success|failure",
   "discovery": { "status": "...", "logs": "..." },
   "build":     { "status": "...", "exit_code": 0, "logs": "..." },
   "tests":     { "status": "...", "passed": 0, "failed": 0, "logs": "..." },
   "run":       { "status": "...", "response_code": 200, "logs": "..." },
-  "errors":    [],
-  "duration_seconds": 0,
-  "stages": {
-    "discovery": { "session_tokens": {}, "session_cost": 0.0 },
-    "build":     { "session_tokens": {}, "session_cost": 0.0 },
-    "tests":     { "session_tokens": {}, "session_cost": 0.0 },
-    "run":       { "session_tokens": {}, "session_cost": 0.0 }
-  },
-  "total_cost": 0.0
+  "session_tokens": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0 },
+  "session_cost": 0.0
 }
 ```
