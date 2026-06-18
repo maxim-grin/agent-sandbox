@@ -256,8 +256,15 @@ echo "[run_agent] Session ID: $SESSION_ID"
 
 # --- Run 4-stage command loop ---
 PIPELINE_START=$(date +%s)
+RUN_TOTAL_START_NS=$(date +%s%N 2>/dev/null || printf '%s000000000' "$(date +%s)")
+DISCOVERY_DURATION_NS=0
+BUILD_DURATION_NS=0
+TESTS_DURATION_NS=0
+RUN_DURATION_NS=0
+
 for STAGE in discovery build tests run; do
   echo "[run_agent] ── Stage: $STAGE ──"
+  STAGE_START_NS=$(date +%s%N 2>/dev/null || printf '%s000000000' "$(date +%s)")
 
   CMD_PAYLOAD=$(jq -n --arg cmd "$STAGE" '{"command": $cmd, "arguments": ""}')
 
@@ -297,7 +304,12 @@ for STAGE in discovery build tests run; do
     fi
     sleep 2
   done
+  STAGE_END_NS=$(date +%s%N 2>/dev/null || printf '%s000000000' "$(date +%s)")
+  printf -v "${STAGE^^}_DURATION_NS" '%s' "$(( STAGE_END_NS - STAGE_START_NS ))"
 done
+
+RUN_TOTAL_END_NS=$(date +%s%N 2>/dev/null || printf '%s000000000' "$(date +%s)")
+RUN_TOTAL_DURATION_NS=$(( RUN_TOTAL_END_NS - RUN_TOTAL_START_NS ))
 
 # --- Collect stage JSONs and aggregate ---
 echo "[run_agent] Aggregating stage results..."
@@ -340,7 +352,17 @@ jq -n \
   --argjson build "$BUILD_JSON" \
   --argjson tests "$TESTS_JSON" \
   --argjson run "$RUN_JSON" \
-  '{status: $status, discovery: $discovery, build: $build, tests: $tests, run: $run}' \
+  --argjson discovery_ns "$DISCOVERY_DURATION_NS" \
+  --argjson build_ns "$BUILD_DURATION_NS" \
+  --argjson tests_ns "$TESTS_DURATION_NS" \
+  --argjson run_ns "$RUN_DURATION_NS" \
+  --argjson total_ns "$RUN_TOTAL_DURATION_NS" \
+  '{status: $status,
+    discovery: ($discovery + {duration_seconds: ($discovery_ns / 1000000000.0)}),
+    build:     ($build     + {duration_seconds: ($build_ns     / 1000000000.0)}),
+    tests:     ($tests     + {duration_seconds: ($tests_ns     / 1000000000.0)}),
+    run:       ($run       + {duration_seconds: ($run_ns       / 1000000000.0)}),
+    duration_seconds: ($total_ns / 1000000000.0)}' \
   > "$HOST_RESULTS/result.json"
 
 # --- Collect token stats via opencode stats ---
